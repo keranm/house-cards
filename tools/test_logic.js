@@ -230,10 +230,15 @@ check("a running wash counts down", (() => {
   const t = laundryAt("rinsing", soon);
   return t && t.pill === "RUNNING" && /^31m left$/.test(t.state);
 })(), JSON.stringify(laundryAt("rinsing", soon)));
-check("the line under the pill names the cycle instead of repeating it", (() => {
+/* The cycle name used to live in the caption. It now lives in the strip, which
+   is why the caption is generic again -- so this asserts the strip carries it
+   and the finish time sits beside the countdown. */
+check("the strip names the cycle, so the words do not have to", (() => {
   const t = laundryAt("spinning", soon);
-  return t && t.state !== "Running" && /^Spinning · done by /.test(t.ctx);
-})());
+  return t && t.state !== "Running"
+      && t.stages[t.stage].label === "Spin"
+      && /^done by /.test(t.aside);
+})(), JSON.stringify(laundryAt("spinning", soon)).slice(0, 160));
 check("no finish time falls back to the cycle name, never 'Running'",
       laundryAt("rinse_hold").state === "Holding the rinse");
 check("an idle washer gives up its slot", laundryAt("power_off") == null
