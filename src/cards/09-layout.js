@@ -25,6 +25,22 @@
     display: flex; flex-direction: column; gap: var(--gap, 16px);
     max-width: var(--max, 1360px); margin: 0 auto;
     padding: var(--pad, 20px 32px 56px);
+
+    /* Impose the kit's shape on FOREIGN cards too.
+       A card built by Lovelace's helpers renders a real <ha-card>, which takes
+       its radius, border and shadow from these custom properties. Setting them
+       here is why the AirGradient cards and the alert ticker match the rest of
+       the page without any of them being modified, and without a theme: custom
+       properties inherit through shadow boundaries, so every descendant card
+       picks them up.
+       This is also where "no drop shadows" is enforced -- stock HA cards ship
+       with one, and it is the single thing that makes a page read as a pile of
+       widgets rather than one surface. */
+    --ha-card-border-radius: var(--hc-r-hero);
+    --ha-card-box-shadow: none;
+    --ha-card-border-width: 1px;
+    --ha-card-border-color: var(--hc-border);
+    --ha-card-background: var(--hc-surface);
   }
   .lrow { display: grid; gap: var(--gap, 16px); align-items: start; }
   .lcol { display: flex; flex-direction: column; gap: var(--gap, 16px); }
