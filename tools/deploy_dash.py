@@ -15,7 +15,9 @@ HERE = pathlib.Path(__file__).parent
 sys.path.insert(0, str(HERE))
 from ws import WS
 
-TARGET = "house"                    # the new dashboard, and the only one writable
+TARGET = "the-house"                # the new dashboard, and the only one writable
+# HA rejects a url_path with no hyphen ("Url path needs to contain a hyphen"),
+# so plain "house" is not available.
 FORBIDDEN = {"dashboard-house", "lovelace", "home2", "myhealth-dashboard"}
 
 if TARGET in FORBIDDEN or not TARGET:
