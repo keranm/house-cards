@@ -216,10 +216,16 @@ check("labels are English, not enum keys",
 check("an unmapped state still reads as words",
       HC.stateLabel(null, "steam_softening") === "Steam softening");
 
-const laundryAt = (state, remaining) => {
+/* total_time is pinned rather than taken from the dump: the real one is only
+   set while a cycle is loaded, so these assertions would pass or fail
+   depending on whether the washer happened to be running when states.json was
+   captured. */
+const laundryAt = (state, remaining, total) => {
   const st = JSON.parse(JSON.stringify(hass.states));
   st[roles.laundry.status].state = state;
   st[roles.laundry.remaining].state = remaining || "unknown";
+  st[roles.laundry.total_time] = { state: String(total == null ? 44 : total),
+                                   attributes: {} };
   /* Push the completion event out of the unload window so these cases test
      the status alone. */
   st[roles.laundry.last_event].state = new Date(Date.now() - 9e7).toISOString();
