@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>house-cards preview</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  /* This file stands in for a Lovelace view: same page background, same column
+     width, same 16px gaps. It exists so the design can be checked without a
+     deploy, and so a card can be poked at in devtools with real state. */
+  body { margin: 0; background: #f2f5f4; font-family: 'IBM Plex Sans', system-ui, sans-serif; }
+  .page { max-width: 1360px; margin: 0 auto; padding: 20px 32px 56px;
+          display: flex; flex-direction: column; gap: 16px; }
+  .bar { background: #0d2233; height: 60px; display: flex; align-items: center;
+         padding: 0 32px; gap: 4px; }
+  .bar a { color: #8fa3b4; font-size: 15px; font-weight: 600; padding: 0 16px;
+           line-height: 60px; text-decoration: none; }
+  .bar a.on { color: #fff; box-shadow: inset 0 -2px 0 #16c397; }
+  .hero { display: grid; grid-template-columns: 1fr 300px; gap: 16px; align-items: start; }
+  .air { display: grid; grid-template-columns: 340px 1fr; gap: 16px; align-items: start; }
+  .stub { background: #fff; border: 1px solid #e3e8e6; border-radius: 16px;
+          padding: 22px 26px; color: #8a978f; font-size: 13px; }
+  body.dark { background: #0a1420; }
+</style>
+</head>
+<body>
+<div class="bar">
+  <a class="on">Home</a><a>Climate</a><a>Energy</a><a>Health</a><a>Devices</a>
+</div>
+<div class="page" id="page"></div>
+
+<script src="./preview_states.js"></script>
+<script src="../dist/house-cards.js"></script>
+<script>
+  const hass = {
+    states: Object.fromEntries(window.PREVIEW_STATES.map((s) => [s.entity_id, s])),
+    themes: { darkMode: new URLSearchParams(location.search).has("dark") },
+    callService: (d, s, data) => { console.log("callService", d, s, data); return Promise.resolve(); },
+    callWS: (msg) => {
+      /* The room grid asks for history. Synthesise a plausible walk per entity
+         so the sparklines have something to draw; nothing else uses callWS. */
+      if (msg.type !== "history/history_during_period") return Promise.reject(new Error("no ws"));
+      const out = {};
+      for (const id of msg.entity_ids) {
+        const base = Number((hass.states[id] || {}).state) || 20;
+        out[id] = Array.from({ length: 24 }, (_, i) => ({
+          s: String(base + Math.sin(i / 3) * 0.6 + (Math.random() - 0.5) * 0.2)
+        }));
+      }
+      return Promise.resolve(out);
+    }
+  };
+  if (hass.themes.darkMode) document.body.classList.add("dark");
+
+  const page = document.getElementById("page");
+
+  const make = (tag, config, parent) => {
+    const el = document.createElement(tag);
+    el.setConfig(config || {});
+    el.hass = hass;
+    (parent || page).appendChild(el);
+    return el;
+  };
+
+  const div = (cls, parent) => {
+    const d = document.createElement("div");
+    d.className = cls;
+    (parent || page).appendChild(d);
+    return d;
+  };
+
+  const stub = (text, parent) => {
+    const d = document.createElement("div");
+    d.className = "stub";
+    d.textContent = text;
+    (parent || page).appendChild(d);
+    return d;
+  };
+
+  /* Same order as the handoff. */
+  stub("Alert ticker — existing AlertTicker card, restyled");
+
+  const hero = div("hero");
+  make("hc-who-is-home", {}, hero);
+  make("hc-house-battery", { delay: 60 }, hero);
+
+  make("hc-attention", {});
+  make("hc-step-leaderboard", {});
+
+  const air = div("air");
+  const left = document.createElement("div");
+  left.style.display = "flex";
+  left.style.flexDirection = "column";
+  left.style.gap = "16px";
+  air.appendChild(left);
+  stub("Outside Air Quality — existing air-quality-scene-card", left);
+  stub("The Air Around Us — existing air-quality-scene-card", left);
+  const right = document.createElement("div");
+  right.style.display = "flex";
+  right.style.flexDirection = "column";
+  right.style.gap = "16px";
+  air.appendChild(right);
+  make("hc-energy-now", {}, right);
+  make("hc-whats-on", {}, right);
+
+  make("hc-room-grid", {});
+  make("hc-batteries", {});
+</script>
+</body>
+</html>

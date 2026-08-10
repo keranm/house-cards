@@ -1,0 +1,7 @@
+# Read-only snapshots of the instance. Regenerate with tools/dump_states.py.
+# Not committed: they are large, they churn, and they contain the full entity
+# list of a private home.
+tools/states.json
+tools/registry.json
+tools/preview_states.js
+.DS_Store
