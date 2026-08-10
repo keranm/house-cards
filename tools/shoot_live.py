@@ -13,7 +13,10 @@ import urllib.request
 
 import websocket
 
-BASE = "http://homeassistant.local:8123"
+from ws import base_url
+
+# Address comes from env.txt, which is not published.
+BASE = base_url()
 # env.txt is multi-line key: value. Reading the whole file and splitting once
 # takes the token PLUS every line after it, and auth then fails with an empty
 # frame or a bare 401. Parse per line.

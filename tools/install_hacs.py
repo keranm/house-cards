@@ -13,12 +13,13 @@ import json, pathlib, subprocess, sys, time, urllib.request
 
 HERE = pathlib.Path(__file__).parent
 sys.path.insert(0, str(HERE))
-from ws import WS, token
+from ws import WS, base_url, token
 
 REPO = "keranm/house-cards"
 CATEGORY = "plugin"
 SERVED = "/hacsfiles/house-cards/house-cards.js"
-BASE = "http://homeassistant.local:8123"
+# Address comes from env.txt, which is not published.
+BASE = base_url()
 
 local = (HERE.parent / "dist" / "house-cards.js").read_bytes()
 print(f"local  dist/house-cards.js  {len(local)} bytes")

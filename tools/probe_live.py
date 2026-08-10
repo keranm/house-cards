@@ -10,7 +10,10 @@ colour of specific nodes, which settles it in one run.
 import json, pathlib, shutil, subprocess, sys, time, urllib.request
 import websocket
 
-BASE = "http://homeassistant.local:8123"
+from ws import base_url
+
+# Address comes from env.txt, which is not published.
+BASE = base_url()
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 PATH = "/the-house/home"
 PORT = 9334

@@ -18,3 +18,7 @@ tools/preview_roles.js
 tools/house_dash.json
 # Dashboard backups taken before each deploy. Same content, one per deploy.
 tools/backup_the-house_*.json
+# The map itself: people, rooms, devices. gen_roles.py holds the logic and
+# imports the facts from here, so the published repo describes the machinery
+# without describing the household.
+tools/house_private.py
