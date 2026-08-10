@@ -74,6 +74,38 @@
     return mins > 0 ? mins : null;
   };
 
+  /* Where an appliance is up to, as its own front panel would put it: which
+     stage of the cycle is lit, and how far through the whole thing it is.
+     Both come from the role map -- the stage list is this machine's cycle, and
+     an appliance that does not describe one simply gets no strip. */
+  HC.cycle = (hass, cfg, state, minsLeft) => {
+    const stages = (cfg || {}).stages;
+    if (!stages || !stages.length) return { stages: null, stage: null, progress: null };
+
+    let stage = -1;
+    for (let i = 0; i < stages.length; i++) {
+      if ((stages[i].states || []).indexOf(state) >= 0) { stage = i; break; }
+    }
+
+    /* Time is the honest measure of progress and the machine gives us both
+       halves of it. Falling back to the stage index would claim a wash is 60%
+       done the moment it starts spinning, when spinning is the short bit. */
+    const total = HC.num((HC.read(hass, (cfg || {}).total_time) || {}).state);
+    /* `total_time` is the length of the cycle the machine last accepted, and it
+       lingers after one finishes. More left than the whole cycle is the tell
+       that it belongs to a previous wash, and the stage is the better guess. */
+    const usable = total > 0 && minsLeft != null && minsLeft <= total;
+    let progress = null;
+    if (usable) {
+      progress = (total - minsLeft) / total;
+    } else if (stage >= 0) {
+      progress = (stage + 0.5) / stages.length;
+    }
+    if (progress != null) progress = Math.max(0, Math.min(1, progress));
+
+    return { stages, stage: stage < 0 ? null : stage, progress };
+  };
+
   /* A raw state string to something you would say out loud. The map lives in
      the role map, not here: "rinse_hold" is this washer's word, and the next
      appliance will have its own. Absent a map, title-case the state -- which
@@ -164,29 +196,37 @@
                  entity: cfg.status };
       }
 
-      if (has(cfg.running_states, status.state)) {
+      if (has(cfg.running_states, status.state) || has(cfg.paused_states, status.state)) {
+        const paused = has(cfg.paused_states, status.state);
         /* `remaining_time` is device_class timestamp -- it is when the cycle
            ENDS, not how long is left. Running it through HC.num returns null
            for the ISO string, which is why this branch used to fall through to
            the bare word "Running" every single time. */
-        const mins = HC.minsUntil(HC.read(hass, cfg.remaining).state, ctx.now);
+        const endsAt = HC.read(hass, cfg.remaining).state;
+        const mins = HC.minsUntil(endsAt, ctx.now);
+        const run = HC.cycle(hass, cfg, status.state, mins);
+
         return {
-          rank: 120, label: "Laundry", pill: "RUNNING", tone: "good",
+          rank: paused ? 125 : 120, label: "Laundry",
+          pill: paused ? "PAUSED" : "RUNNING", tone: paused ? "warn" : "good",
+          amber: paused,
           state: mins != null ? HC.duration(mins) + " left" : label,
-          /* The pill already says RUNNING, so the line underneath earns its
-             place by naming the part of the cycle rather than repeating it. */
-          ctx: mins != null
-            ? `${label} · done by ${HC.clock(HC.read(hass, cfg.remaining).state)}`
-            : "Cycle in progress",
+          /* The strip below names the part of the cycle, so the pill and the
+             state line do not have to. Where there is no strip the words are
+             all there is, and the state falls back to the cycle name. */
+          aside: paused ? "Paused mid-cycle"
+               : mins != null ? `done by ${HC.clock(endsAt)}` : null,
+          ctx: paused ? "Start it again to finish" : "Cycle in progress",
+          /* `pause` belongs to no stage -- the machine stops reporting which
+             one it stopped in -- so the strip would stand there with nothing
+             lit. Drop it and keep the bar, which still knows how far in it
+             got. Guessing the stage from elapsed time does not work: the
+             stages are nowhere near equal lengths. */
+          stages: paused ? null : run.stages,
+          stage: paused ? null : run.stage,
+          progress: run.progress,
           entity: cfg.status
         };
-      }
-
-      if (has(cfg.paused_states, status.state)) {
-        return { rank: 125, label: "Laundry", pill: "PAUSED", tone: "warn",
-                 amber: true, state: label,
-                 ctx: "Mid-cycle · start it again to finish",
-                 entity: cfg.status };
       }
 
       /* A delayed start is worth knowing about so nobody opens the door on it,
@@ -210,10 +250,17 @@
              < Number(config.unload_window_hours || 3);
 
       if (has(cfg.finished_states, status.state) || recent) {
+        const done = HC.cycle(hass, cfg, status.state, null);
         return {
           rank: 140, label: "Laundry", pill: "UNLOAD ME", tone: "warn",
           amber: true, state: "Finished",
+          aside: recent ? HC.ago(at_) : null,
           ctx: recent ? `Cycle finished ${HC.ago(at_)}` : "Waiting to be emptied",
+          /* Every stage lit is the clearest way to say the cycle is over --
+             clearer than the word, and it is the same picture the machine's
+             own panel shows. */
+          stages: done.stages, stage: done.stages ? done.stages.length : null,
+          progress: 1,
           entity: cfg.status
         };
       }

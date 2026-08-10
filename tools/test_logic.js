@@ -244,6 +244,56 @@ check("a paused washer says so", laundryAt("pause").pill === "PAUSED");
 check("a fault outranks a running cycle",
       laundryAt("error").rank > laundryAt("rinsing").rank);
 
+console.log("\ncycle strip");
+const STAGES = roles.laundry.stages;
+check("every stage a running state can be in is drawn", (() => {
+  const owned = new Set([].concat.apply([], STAGES.map((s) => s.states)));
+  return roles.laundry.running_states.every((s) => owned.has(s));
+})(), "unowned: " + roles.laundry.running_states.filter((s) =>
+  !STAGES.some((g) => g.states.indexOf(s) >= 0)).join(",") || "none");
+check("no running state belongs to two stages", (() => {
+  const all = [].concat.apply([], STAGES.map((s) => s.states));
+  return new Set(all).size === all.length;
+})());
+check("every stage carries an icon and a name",
+      STAGES.every((s) => s.icon && s.label && s.key));
+
+const cycleAt = (state, minsLeft, total) => HC.cycle(
+  { states: { "sensor.frisky_total_time": { state: total == null ? "unknown" : String(total),
+                                            attributes: {} } } },
+  Object.assign({}, roles.laundry, { total_time: "sensor.frisky_total_time" }),
+  state, minsLeft);
+
+check("the strip lights the stage the machine reports",
+      cycleAt("rinsing", 17, 44).stage === 2 && cycleAt("detecting", 42, 44).stage === 0);
+check("progress comes from the clock, not the stage index", (() => {
+  const p = cycleAt("spinning", 6, 44).progress;   // spin is stage 4 of 5
+  return Math.abs(p - (44 - 6) / 44) < 1e-9 && p > 0.8;
+})());
+check("a stale total_time is ignored rather than clamped to zero", (() => {
+  /* total_time lingers from the previous cycle; more left than the whole
+     cycle is the tell. Falls back to the stage. */
+  const p = cycleAt("rinsing", 90, 44).progress;
+  return Math.abs(p - 2.5 / 5) < 1e-9;
+})());
+check("no total_time falls back to the stage",
+      Math.abs(cycleAt("rinsing", 17, null).progress - 2.5 / 5) < 1e-9);
+check("progress never leaves 0..1", [
+  ["rinsing", 0, 44], ["rinsing", 44, 44], ["detecting", 43.9, 44], ["spinning", 0.1, 44]
+].every(([s, m, t]) => { const p = cycleAt(s, m, t).progress; return p >= 0 && p <= 1; }));
+check("an appliance with no cycle described gets no strip",
+      HC.cycle(hass, {}, "running", 10).stages === null);
+check("a paused washer keeps its bar but drops the strip", (() => {
+  const t = laundryAt("pause", soon);
+  return t && t.stages == null && t.progress != null;
+})());
+check("a finished washer lights every stage", (() => {
+  const t = laundryAt("end");
+  return t && t.stage === STAGES.length && t.progress === 1;
+})());
+check("a state in no stage lights nothing rather than guessing",
+      cycleAt("reserved", 20, 44).stage === null);
+
 console.log("\nenergy attribution");
 /* Five readings and one conservation equation, so the split between sources
    and sinks is decided by a rule. Whatever the rule, the arithmetic has to

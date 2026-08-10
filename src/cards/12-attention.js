@@ -24,12 +24,49 @@
 
   const ATT_CSS = `
   .tiles { display: grid; grid-template-columns: repeat(var(--cols, 4), minmax(0,1fr)); gap: 16px; }
-  .att { display: flex; flex-direction: column; gap: 6px; cursor: pointer; }
+  /* A floor rather than a fixed height: the tallest layout in the row is the
+     one with a cycle strip, and without the floor the whole row would shrink
+     by twenty pixels every time the washer finished and the slot rotated on. */
+  .att { display: flex; flex-direction: column; gap: 6px; cursor: pointer;
+         position: relative; overflow: hidden; min-height: 132px; }
+  .att .staterow { display: flex; align-items: baseline; justify-content: space-between;
+                   gap: 10px; margin-top: 6px; }
   .att .state {
     font-family: var(--hc-mono); font-size: 20px; font-weight: 600;
-    color: var(--hc-ink); margin-top: 6px;
+    color: var(--hc-ink);
   }
+  .att .aside { font-family: var(--hc-mono); font-size: 11px; color: var(--hc-muted);
+                white-space: nowrap; }
   .att .ctx { font-size: 13px; color: var(--hc-muted); margin-top: 4px; }
+
+  /* ---- cycle strip ---- *
+   * The washer's own front panel, in this page's language: the stages of a
+   * cycle in a row, the one it is on lit, the ones behind it ticked off, and
+   * how far through it is carried along the bottom edge of the card rather
+   * than as another bar competing with the number.
+   */
+  .att .stages { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr;
+                 gap: 2px; margin-top: 8px; }
+  .att .stage { display: flex; flex-direction: column; align-items: center; gap: 2px;
+                opacity: .3; transition: opacity .3s ease; }
+  .att .stage ha-icon { --mdc-icon-size: 17px; width: 17px; height: 17px;
+                        color: var(--hc-muted); }
+  .att .stage .nm { font-family: var(--hc-mono); font-size: 9px; letter-spacing: .08em;
+                    text-transform: uppercase; color: var(--hc-muted); }
+  .att .stage.done { opacity: .6; }
+  .att .stage.done ha-icon { color: var(--hc-green); }
+  .att .stage.now { opacity: 1; }
+  .att .stage.now ha-icon { color: var(--hc-green); }
+  .att .stage.now .nm { color: var(--hc-ink); font-weight: 600; }
+  .att.amber .stage.now ha-icon, .att.amber .stage.done ha-icon { color: var(--hc-amber); }
+  .att.amber .stage.now .nm { color: var(--hc-amber-ink); }
+
+  .att .prog { position: absolute; left: 0; right: 0; bottom: 0; height: 3px;
+               background: var(--hc-rule); }
+  .att .prog i { display: block; height: 100%; width: 0;
+                 background: var(--hc-green); transition: width .6s ease; }
+  .att.amber .prog i { background: var(--hc-amber); }
+  @media (prefers-reduced-motion: reduce) { .att .prog i { transition: none; } }
   .att.amber { background: var(--hc-amber-tint); border-color: var(--hc-amber-border); }
   .att.amber .label, .att.amber .ctx { color: var(--hc-amber-body); }
   .att.amber .state { color: var(--hc-amber-ink); }
@@ -75,16 +112,24 @@
         const label = HC.el("span", "label caption");
         const pill = HC.pill("--", "idle");
         HC.add(head, label, pill);
+        const staterow = HC.el("div", "staterow");
         const state = HC.el("div", "state");
+        const aside = HC.el("span", "aside");
+        HC.add(staterow, state, aside);
         const ctx = HC.el("div", "ctx");
-        HC.add(t, head, state, ctx);
+        const stages = HC.el("div", "stages");
+        const prog = HC.el("div", "prog");
+        const fill = HC.el("i");
+        HC.add(prog, fill);
+        HC.add(t, head, staterow, ctx, stages, prog);
         /* Stagger the row 40ms apart, as the design specifies. */
         if (cfg.animate !== false) {
           t.classList.add("in");
           t.style.animationDelay = (i * 40) + "ms";
         }
         HC.add(grid, t);
-        return { slot: key, t, label, pill, state, ctx, subject: null };
+        return { slot: key, t, label, pill, state, aside, ctx, stages, prog, fill,
+                 subject: null, stageKey: null };
       });
 
       this._subscribe();
@@ -165,6 +210,11 @@
       HC.setText(tile.pill, spec.pill);
       tile.pill.setTone(spec.tone);
       HC.setText(tile.state, spec.state);
+      HC.setText(tile.aside, spec.aside || "");
+      this._setStages(tile, spec);
+      /* The strip already names the stage, so the sentence would only repeat
+         it. Where there is no strip the sentence is all there is. */
+      tile.ctx.style.display = spec.stages ? "none" : "";
       HC.setText(tile.ctx, spec.ctx);
 
       const tone = spec.tone === "bad" ? "bad"
@@ -203,6 +253,40 @@
       /* First paint should not fade -- the row already has its entry
          animation, and running both makes the tiles arrive twice. */
       this._settled = true;
+    }
+
+    /* The cycle strip. Rebuilt only when the stage list itself changes -- which
+       is when a different candidate takes the slot, not on every update. */
+    _setStages(tile, spec) {
+      const stages = spec.stages || null;
+      const key = stages ? stages.map((s) => s.key).join("|") : "";
+      if (tile.stageKey !== key) {
+        tile.stageKey = key;
+        tile.stages.textContent = "";
+        tile.stageNodes = (stages || []).map((s) => {
+          const cell = HC.el("div", "stage");
+          const icon = document.createElement("ha-icon");
+          icon.setAttribute("icon", s.icon || "mdi:circle-small");
+          HC.add(cell, icon, HC.el("span", "nm", s.label));
+          HC.add(tile.stages, cell);
+          return cell;
+        });
+      }
+
+      tile.stages.style.display = stages ? "" : "none";
+      tile.prog.style.display = spec.progress == null ? "none" : "";
+      if (spec.progress != null) {
+        tile.fill.style.width = Math.round(spec.progress * 100) + "%";
+      }
+      if (!stages) return;
+
+      /* A null stage means the machine is in a state this cycle does not
+         describe. Light nothing rather than guessing at one. */
+      (tile.stageNodes || []).forEach((cell, i) => {
+        const done = spec.stage != null && i < spec.stage;
+        const now = spec.stage != null && i === spec.stage;
+        cell.className = "stage" + (now ? " now" : done ? " done" : "");
+      });
     }
 
     /* A candidate, or the honest version of an empty stage. */

@@ -33,6 +33,19 @@
 <script src="./preview_roles.js"></script>
 <script src="../dist/house-cards.js"></script>
 <script>
+  /* HA's icon set is not available over file://, so `ha-icon` would render as
+     a zero-width nothing and the strips that use it would look broken when
+     they are not. Stand in a plain glyph at the right size: it proves the
+     layout offline, and the real icons are checked with tools/shoot_live.py. */
+  if (!customElements.get("ha-icon")) {
+    customElements.define("ha-icon", class extends HTMLElement {
+      connectedCallback() {
+        this.style.cssText = "display:inline-block;width:17px;height:17px;"
+          + "border-radius:4px;background:currentColor;opacity:.65";
+      }
+    });
+  }
+
   const HOUSE = window.PREVIEW_HOUSE;
   const TH_HELPERS = Object.fromEntries(Object.entries(HOUSE.thresholds)
     .filter(([, v]) => v.helper).map(([k, v]) => [k, v.helper]));

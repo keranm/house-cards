@@ -68,6 +68,18 @@ stuffiest room. They rotate a page at a time every `rotate_seconds` (15 by
 default). Stepping one at a time was tried first and looks like a conveyor:
 what was on the right reappears on the left and reads as a glitch.
 
+A candidate may also hand the tile a **cycle strip** — the stages of an
+appliance's run in a row, the one it is on lit, the ones behind it ticked off,
+and how far through it is carried along the bottom edge of the card. The strip
+takes the place of the caption line rather than being added below it, so the
+row keeps its height. The stage list lives in the role map, because it is that
+appliance's cycle; anything without one simply gets no strip.
+
+Progress comes from the clock — `total_time` against the finish timestamp — not
+from the stage index. Stages are nowhere near equal lengths, and counting them
+would claim a wash was 60% done the moment it started spinning, when spinning
+is the short bit.
+
 Two rules decide what gets in. It has to be something a person in the house
 would act on or enjoy knowing — which is why there is no disk usage, no CPU
 temperature and no wifi signal; the family does not care whether the Pi is
