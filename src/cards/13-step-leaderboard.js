@@ -8,6 +8,13 @@
    * weekly and monthly helpers -- so the card is a straight read with no
    * statistics round trip.
    *
+   * A ZERO IS NOT A RESULT. These counters live on a phone, so zero means
+   * either "has not walked" or "the phone is not with them" -- at school, on a
+   * charger, left at home -- and the card cannot tell which. It therefore
+   * treats zero as an absent reading: dimmed, labelled, ranked last, and never
+   * mentioned in the commentary. Set `zero_is_gap: false` to rank zeroes as
+   * real scores instead.
+   *
    * Set `helpers_created` to the date those helpers were first created. Until
    * a full week and month have elapsed the longer ranges are partial by
    * construction -- a weekly helper made this morning can report less than
@@ -162,9 +169,13 @@
         this._buttons[key].setAttribute("aria-pressed", String(key === this._range));
       }
 
+      const zeroIsGap = this._config.zero_is_gap !== false;
       const rows = this._people.map((p) => {
-        const r = HC.read(this.hass, this._entityFor(p));
-        return { p, steps: r.ok ? r.value : null, entity: this._entityFor(p) };
+        const entity = this._entityFor(p);
+        const r = HC.read(this.hass, entity);
+        let steps = r.ok ? r.value : null;
+        if (zeroIsGap && steps === 0) steps = null;
+        return { p, steps, entity, rawZero: r.ok && r.value === 0 };
       });
 
       const known = rows.filter((r) => r.steps != null);
@@ -184,17 +195,19 @@
         t.row.onclick = () => this.moreInfo(r.entity);
 
         if (r.steps == null) {
-          HC.setText(t.tag, "GAP");
+          HC.setText(t.tag, r.rawZero ? "NOTHING COUNTED" : "GAP");
           t.tag.setTone("idle");
           t.fill.style.width = "1.5%";
           t.fill.style.background = "var(--hc-grey)";
-          HC.setText(t.total, "--");
-          HC.setText(t.gap, "NO DATA");
+          HC.setText(t.total, r.rawZero ? "0" : "--");
+          HC.setText(t.gap, r.rawZero ? "NO PHONE?" : "NO DATA");
           return;
         }
 
         const isLeader = leader && r === leader && r.steps > 0;
-        HC.setText(t.tag, r.steps === 0 ? "NOT STARTED" : isLeader ? "LEADER" : "CHASING");
+        /* Only reachable with zero_is_gap: false. Still not "not started" --
+           the counter is what has nothing, not the person. */
+        HC.setText(t.tag, r.steps === 0 ? "NOTHING COUNTED" : isLeader ? "LEADER" : "CHASING");
         t.tag.setTone(r.steps === 0 ? "idle" : isLeader ? "active" : "good");
 
         /* Minimum 1.5% so a zero still shows a sliver rather than nothing --
@@ -221,14 +234,18 @@
       return `${month} so far${suffix}`;
     }
 
-    /* The personality. Generated from the data rather than written, so it stays
-       true; kept dry and short, and it does not make a joke of anybody who has
-       no data (that is a missing phone, not a lifestyle choice). */
+    /* The personality. Generated from the data rather than written, so it
+       stays true; kept dry and short.
+
+       It only ever talks about people who HAVE a reading. An absent or zero
+       count is not a fact about a person -- it is a fact about where their
+       phone is -- and a dashboard that jokes about it will eventually be
+       wrong about someone in a way that stings. */
     _talkingPoint(ordered, leader) {
       if (this._config.commentary === false) return "";
       const known = ordered.filter((r) => r.steps != null);
-      if (!known.length) return "No step data at all today.";
-      if (!leader || leader.steps === 0) return "Nobody has moved yet.";
+      if (!known.length) return "No step data yet.";
+      if (!leader) return "No step data yet.";
 
       const bits = [];
       const second = known[1];
@@ -236,23 +253,21 @@
         bits.push(`${leader.p.name} is ${HC.commas(leader.steps - second.steps)} ahead`);
       } else if (second) {
         bits.push(`${leader.p.name} and ${second.p.name} are level`);
+      } else {
+        bits.push(`${leader.p.name} is the only one counting today`);
       }
 
-      const zeros = known.filter((r) => r.steps === 0);
-      if (zeros.length === 1 && this._range === "today") {
-        bits.push(`${zeros[0].p.name} has not moved a single step today — the couch is winning`);
-      } else if (zeros.length > 1 && this._range === "today") {
-        bits.push(`${zeros.length} of you are still on zero`);
-      } else {
-        const goal = this._th.step_goal;
-        const done = known.filter((r) => r.steps >= goal);
-        if (done.length) {
-          bits.push(done.length === 1
-            ? `${done[0].p.name} is past ${HC.commas(goal)}`
-            : `${done.length} past ${HC.commas(goal)}`);
-        } else if (leader.steps > goal * 0.75) {
-          bits.push(`${leader.p.name} is closing on ${HC.commas(goal)}`);
-        }
+      const goal = this._th.step_goal;
+      const done = known.filter((r) => r.steps >= goal);
+      if (done.length) {
+        bits.push(done.length === 1
+          ? `${done[0].p.name} is past ${HC.commas(goal)}`
+          : `${done.length} are past ${HC.commas(goal)}`);
+      } else if (leader.steps > goal * 0.75) {
+        bits.push(`${leader.p.name} is closing on ${HC.commas(goal)}`);
+      } else if (known.length > 1) {
+        const spread = leader.steps - known[known.length - 1].steps;
+        if (spread < 500) bits.push("nothing in it");
       }
 
       return bits.slice(0, 2).join(". ") + ".";
