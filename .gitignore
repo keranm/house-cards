@@ -8,3 +8,13 @@ tools/preview_states.js
 tools/house_roles.json
 # Same map as house_roles.json, in the form the preview harness loads it.
 tools/preview_roles.js
+
+# --- instance data: never publish -------------------------------------------
+# This repo is public. Everything below describes THIS house -- which rooms
+# exist, who sleeps in them, what watches the doors -- and none of it is needed
+# to install or read the cards.
+#
+# The generated dashboard, with the whole role map injected into it.
+tools/house_dash.json
+# Dashboard backups taken before each deploy. Same content, one per deploy.
+tools/backup_the-house_*.json

@@ -301,25 +301,44 @@
       /* ---- who is feeding what ----
          Five readings, one conservation equation, six possible edges: the
          split is genuinely ambiguous and has to be decided by a rule rather
-         than measured. The rule is the conventional one, and the one the
-         household would assume: solar covers the house first, then the
-         battery, and only the surplus goes to the grid. Whatever the house
-         still wants after solar and battery is what the grid is importing.
+         than measured. Drawing the raw sensors instead is what produced the
+         old picture -- solar at 62 W drew a full-weight line to a house
+         pulling 3.5 kW, as though the roof were carrying it.
 
-         Drawing the raw sensors instead is what produced the old picture --
-         solar at 62 W drew a full-weight line to a house pulling 3.5 kW, as
-         though the roof were carrying it. */
+         The rule is about which SINK gets first claim, not which source.
+         Power bought from the grid exists because something demanded more than
+         the house could make. The house load is involuntary; charging the
+         battery is a choice the inverter made. So the grid feeds the house
+         first, and only what the house cannot absorb is charging the battery.
+         Battery discharge is claimed next, and solar -- the source with
+         somewhere else to go -- covers the remainder.
+
+         Solar's surplus then fills the battery before it is sold, which is the
+         same principle from the other end.
+
+         Doing it source-first read plausibly and was wrong in the common case:
+         with 1.45 kW of sun covering a 624 W house, solar claimed the whole
+         load, no house demand was left for a 12 W import to satisfy, and the
+         12 W was drawn arriving at the battery -- as though the house were
+         buying power to charge a battery it was already filling from the roof. */
       const at_least_0 = (v) => (v != null && v > 0 ? v : 0);
       const S = at_least_0(solar), L = at_least_0(load);
+      const I = at_least_0(imp), X = at_least_0(exp);
       const chg = charging ? at_least_0(flow.kw) : 0;
       const dis = discharging ? at_least_0(flow.kw) : 0;
 
-      const solarHome = Math.min(S, L);
-      const solarBattery = Math.min(S - solarHome, chg);
-      const solarGrid = Math.min(S - solarHome - solarBattery, at_least_0(exp));
-      const batteryHome = Math.min(dis, L - solarHome);
-      const gridHome = Math.min(at_least_0(imp), L - solarHome - batteryHome);
-      const gridBattery = Math.min(at_least_0(imp) - gridHome, chg - solarBattery);
+      const gridHome = Math.min(I, L);
+      const batteryHome = Math.min(dis, L - gridHome);
+      const solarHome = Math.max(0, L - gridHome - batteryHome);
+
+      const solarBattery = Math.min(Math.max(0, S - solarHome), chg);
+      const solarGrid = Math.min(Math.max(0, S - solarHome - solarBattery), X);
+      /* Bounded by the import that is not already feeding the house. Without
+         that bound the edge is "whatever solar did not charge", which invents
+         grid power that the meter never measured -- a pack charging with no
+         sun and no import drew 3 kW off an idle grid. */
+      const gridBattery = Math.min(Math.max(0, I - gridHome),
+                                   Math.max(0, chg - solarBattery));
 
       const GREEN = "var(--hc-green)";
       const RED = "var(--hc-red)";

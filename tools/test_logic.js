@@ -305,13 +305,16 @@ console.log("\nenergy attribution");
    close: everything arriving at the house must equal the load. */
 const split = (solar, load, imp, exp, chg, dis) => {
   const z = (v) => (v > 0 ? v : 0);
-  const S = z(solar), L = z(load);
-  const sh = Math.min(S, L);
-  const sb = Math.min(S - sh, chg);
-  const sg = Math.min(S - sh - sb, z(exp));
-  const bh = Math.min(dis, L - sh);
-  const gh = Math.min(z(imp), L - sh - bh);
-  const gb = Math.min(z(imp) - gh, chg - sb);
+  const S = z(solar), L = z(load), I = z(imp), X = z(exp);
+  /* Sink-first: the grid feeds the house before it feeds the battery, because
+     an import exists because of demand and the house is the demand that was
+     not chosen. Mirrors 15-energy-now.js. */
+  const gh = Math.min(I, L);
+  const bh = Math.min(dis, L - gh);
+  const sh = Math.max(0, L - gh - bh);
+  const sb = Math.min(Math.max(0, S - sh), chg);
+  const sg = Math.min(Math.max(0, S - sh - sb), X);
+  const gb = Math.min(Math.max(0, I - gh), Math.max(0, chg - sb));
   return { sh, sb, sg, bh, gh, gb };
 };
 const closes = (s) => {
@@ -347,6 +350,21 @@ check("a genuinely still pack is still idle", batAt(0, 0).dir === "idle");
 check("sub-resolution readings stay idle", batAt(0, 0.002).dir === "idle");
 check("grid-to-battery only appears when importing",
       split(0, 0.4, 0, 0, 3, 0).gb === 0 && split(0, 0.4, 3.4, 0, 3, 0).gb > 0);
+
+/* The case that exposed the source-first rule: sun covering the whole house,
+   and a trickle of grid alongside it. Attributed source-first, solar claimed
+   the entire load, nothing was left for the import to feed, and the trickle
+   was drawn arriving at the battery. */
+check("a trickle of grid beside plenty of sun feeds the HOUSE, not the battery",
+      (() => {
+        const r = split(1.45, 0.624, 0.012, 0, 0.838, 0);
+        return r.gh > 0 && r.gb === 0
+            && Math.abs(r.sh - (0.624 - 0.012)) < 1e-9;
+      })(), JSON.stringify(split(1.45, 0.624, 0.012, 0, 0.838, 0)));
+check("the surplus still charges the battery in that case",
+      Math.abs(split(1.45, 0.624, 0.012, 0, 0.838, 0).sb - 0.838) < 1e-9);
+check("deliberate grid charging still reaches the battery",
+      split(0, 0.4, 3.4, 0, 3.0, 0).gb === 3.0);
 
 console.log("\nslot filling");
 const pool = poolAt(12);
