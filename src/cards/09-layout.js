@@ -57,13 +57,16 @@
       if (cfg.max_width) page.style.setProperty("--max", cfg.max_width + "px");
       if (cfg.gap != null) page.style.setProperty("--gap", cfg.gap + "px");
       if (cfg.padding) page.style.setProperty("--pad", cfg.padding);
-      if (cfg.background) {
-        /* The host paints the page colour so the column and the space either
-           side of it are the same ground. */
-        this.style.background = cfg.background;
-        this.style.display = "block";
-        this.style.minHeight = "100vh";
-      }
+      /* The host paints the page colour so the column and the space either
+         side of it are the same ground.
+         It MUST come from the token, not a literal. Hardcoding the light
+         #f2f5f4 here put a light ground under cards that were following HA
+         into dark mode -- and the Rooms heading, which sits on the page rather
+         than inside a card, rendered near-white on near-white. A literal is
+         only honoured when someone asks for one explicitly. */
+      this.style.background = cfg.background || "var(--hc-page)";
+      this.style.display = "block";
+      this.style.minHeight = "100vh";
 
       this._children = [];
       this._slots = [];
