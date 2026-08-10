@@ -44,12 +44,50 @@ strobes.
 |---|---|
 | `hc-who-is-home` | Who is in, where the others are, since when |
 | `hc-house-battery` | State of charge, direction, time to full or time left |
-| `hc-attention` | Doors, bins, laundry and low batteries in one row |
+| `hc-attention` | Doors and batteries, plus what the hour makes worth knowing |
 | `hc-step-leaderboard` | Ranked steps by day/week/month, with generated commentary |
 | `hc-room-grid` | Every room's temperature, humidity, trend; click to expand |
 | `hc-energy-now` | Live flow between solar, grid, battery and the house |
 | `hc-whats-on` | Which lights are on, tap to toggle, all-off |
 | `hc-batteries` | Device batteries worst-first, healthy ones folded away |
+
+### The rotating half of the attention row
+
+Two of that row's four tiles are fixed — is the house shut, is anything flat.
+The other two are a stage, filled at render time from a pool of candidates in
+`src/core/09-context.js`.
+
+**Sticky** candidates are live facts and hold their slot until they stop being
+true: bin night, the washer running or waiting to be unloaded, a room's CO₂
+past the bad line the Climate Brain acts on.
+
+**Ambient** candidates are for when nothing is happening, and each declares
+which parts of the day it is worth reading in — weather, daylight left, the
+solar forecast, the power price, outside temperature, the shopping list, the
+stuffiest room. They rotate a page at a time every `rotate_seconds` (15 by
+default). Stepping one at a time was tried first and looks like a conveyor:
+what was on the right reappears on the left and reads as a glitch.
+
+Two rules decide what gets in. It has to be something a person in the house
+would act on or enjoy knowing — which is why there is no disk usage, no CPU
+temperature and no wifi signal; the family does not care whether the Pi is
+warm. And it must not duplicate the alert ticker, which already owns everything
+genuinely wrong (leaks, wind, mail, an open garage). This row is the calm half
+of the page on purpose.
+
+Bins are the clearest case of the two kinds. The tile used to sit amber for the
+whole of collection day, which is how you get told to put the bins out at seven
+in the evening, eleven hours after the truck has been. The notice now has a
+window with two ends — it opens 07:00 the morning before and closes 07:00 on
+collection day — and outside it the bins give up the slot. Both hours are
+configurable:
+
+```yaml
+type: custom:hc-attention
+rotate_seconds: 15
+bin_window: { open_hour: 7, close_hour: 7 }
+tiles: [doors, context, context, batteries]
+```
 
 Every card works with no config at all — the generated role map already knows
 this house. Everything is overridable:
@@ -93,13 +131,19 @@ for stock cards sitting alongside these.
 ## Development
 
 ```
-python3 tools/dump_states.py     # read-only snapshot of the instance
-python3 tools/gen_roles.py       # regenerate the default role map
-python3 tools/verify_roles.py    # assert every referenced entity exists
-python3 build.py                 # concatenate src/ -> dist/, parse-check
-node tools/test_logic.js         # run the shipped bundle against real state
-open tools/preview.html          # render every card, no HA needed
+python3 tools/dump_states.py         # read-only snapshot of the instance
+python3 tools/gen_roles.py           # regenerate the default role map
+python3 tools/verify_roles.py        # assert every referenced entity exists
+python3 build.py                     # concatenate src/ -> dist/, parse-check
+node tools/test_logic.js             # run the shipped bundle against real state
+python3 tools/gen_preview_states.py  # states + roles for the preview harness
+open tools/preview.html              # render every card, no HA needed
 ```
+
+The bundle is one IIFE, so `src/` shares a single top-level scope: two files
+declaring the same `const` is a bundle that will not parse. `build.py` runs
+`node --check` for exactly this reason — without it the symptom is a bare
+"Configuration error" box with nothing in the log.
 
 `src/core/04-roles.generated.js` is generated — edit `tools/gen_roles.py`. The
 room half of it is derived from `climate2/zones.py` so the dashboard and the

@@ -2,15 +2,24 @@
   /* ------------------------------------------------------------------ *
    * hc-attention
    * ------------------------------------------------------------------ *
-   * The four things worth knowing before you walk out of the room: is the
-   * house shut, are the bins out, is the laundry done, is anything flat.
+   * The row you read before you walk out of the room.
    *
-   * One card rather than four so the row stays a row -- and so the battery
-   * tile and the Batteries section downstream cannot disagree, because both
-   * read `battery_low` from HC.thresholds.
+   * Two of its four tiles are fixed, because two questions are always worth
+   * asking: is the house shut, is anything flat. The middle two are a stage.
+   * What stands on it comes from HC.contextCandidates -- a live fact if there
+   * is one (bins tonight, washer running, air gone off), and otherwise
+   * something the hour makes worth knowing, rotating on a timer.
    *
-   * Each tile answers with one line of state and one line of context, and
-   * carries its colour on a 3px top border.
+   * This replaced a fixed Bins + Laundry pair. The laundry tile read "Off ·
+   * last cycle finished 2 days ago" roughly nine days in ten, and the bin tile
+   * sat amber telling you to put the bins out for eleven hours after the truck
+   * had already been. Both were honest and neither was worth a quarter of the
+   * row.
+   *
+   * The battery tile stays here rather than deferring to the Batteries section
+   * downstream, and both read `battery_low` from HC.thresholds -- an early
+   * draft had this row calling a device green while that section called the
+   * same device red.
    */
 
   const ATT_CSS = `
@@ -24,25 +33,43 @@
   .att.amber { background: var(--hc-amber-tint); border-color: var(--hc-amber-border); }
   .att.amber .label, .att.amber .ctx { color: var(--hc-amber-body); }
   .att.amber .state { color: var(--hc-amber-ink); }
+  /* Only the swap fades, and only when the tile changes subject. Running it on
+     every hass update would strobe the row in a busy house. */
+  .att.swap .state, .att.swap .ctx, .att.swap .label { animation: hcFade .35s ease both; }
+  @keyframes hcFade { from { opacity: 0; } to { opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) { .att.swap .state,
+    .att.swap .ctx, .att.swap .label { animation: none; } }
   @media (max-width: 900px) { .tiles { grid-template-columns: repeat(2, minmax(0,1fr)); } }
   @media (max-width: 520px) { .tiles { grid-template-columns: 1fr; } }
   `;
 
-  const TILE_KEYS = ["doors", "bins", "laundry", "batteries"];
+  /* "context" is a slot rather than a tile: it is filled from the candidate
+     pool at render time and may hold a different subject on every rotation. */
+  const SLOT_KEYS = ["doors", "context", "batteries"];
+  const DEFAULT_SLOTS = ["doors", "context", "context", "batteries"];
 
   class Attention extends HC.Card {
+    constructor() {
+      super();
+      this._tick = 0;
+      this._timer = null;
+      this._forecast = null;
+      this._unsub = null;
+      this._shown = [];
+    }
+
     build() {
       const cfg = this._config;
-      this._keys = (cfg.tiles || TILE_KEYS).filter((k) => TILE_KEYS.includes(k));
+      this._slots = (cfg.tiles || DEFAULT_SLOTS).filter((k) => SLOT_KEYS.indexOf(k) >= 0);
+      if (!this._slots.length) this._slots = DEFAULT_SLOTS.slice();
 
       const style = HC.el("style");
       style.textContent = ATT_CSS;
 
       const grid = HC.el("div", "tiles");
-      grid.style.setProperty("--cols", String(this._keys.length));
+      grid.style.setProperty("--cols", String(this._slots.length));
 
-      this._tiles = {};
-      this._keys.forEach((key, i) => {
+      this._tiles = this._slots.map((key, i) => {
         const t = HC.el("div", "card tone att");
         const head = HC.el("div", "row between");
         const label = HC.el("span", "label caption");
@@ -57,36 +84,135 @@
           t.style.animationDelay = (i * 40) + "ms";
         }
         HC.add(grid, t);
-        this._tiles[key] = { t, label, pill, state, ctx };
+        return { slot: key, t, label, pill, state, ctx, subject: null };
       });
+
+      this._subscribe();
+      this._startRotation();
 
       const root = HC.el("div");
       HC.add(root, style, grid);
       return root;
     }
 
+    /* ---- rotation ---------------------------------------------------- *
+     * The timer does two jobs. It advances the ambient rotation, and it is
+     * what makes the wall-clock candidates honest: the bin notice closes at
+     * 07:00 and "dark in 2h" has to count down whether or not any entity in
+     * the house happened to change state.
+     */
+    _startRotation() {
+      const secs = Number(this._config.rotate_seconds || 15);
+      if (this._timer || !(secs > 0)) return;
+      this._timer = setInterval(() => {
+        this._tick++;
+        if (this.hass) this.update();
+      }, secs * 1000);
+    }
+
+    /* Forecast data is not on the weather entity in modern HA -- the attribute
+       was removed. It arrives over a subscription that pushes a fresh list
+       whenever the integration updates. */
+    _subscribe() {
+      /* `_pending` matters here in a way it does not on a card that updates
+         rarely: this one is re-entered on every state change in the house and
+         on every rotation tick, and `_unsub` is not set until the socket
+         answers. Without the second flag those few milliseconds are enough to
+         open a stack of duplicate subscriptions, only the last of which can
+         ever be closed again. */
+      if (this._unsub || this._pending) return;
+      if (!this.hass || !this.hass.connection) return;
+      const roles = HC.roles(this._config, "context", this.hass) || {};
+      this._weatherEntity = this._config.weather || roles.weather;
+      if (!this._weatherEntity) return;
+
+      this._pending = true;
+      this.hass.connection.subscribeMessage(
+        (msg) => { this._forecast = (msg && msg.forecast) || []; this.update(); },
+        { type: "weather/subscribe_forecast", forecast_type: "daily",
+          entity_id: this._weatherEntity }
+      ).then((unsub) => {
+        this._pending = false;
+        /* Disconnected while the socket was answering: close it immediately
+           rather than holding a subscription for a card that is gone. */
+        if (!this.isConnected) { try { unsub(); } catch (e) { /* already gone */ } return; }
+        this._unsub = unsub;
+      }).catch(() => { this._pending = false; this._forecast = []; });
+    }
+
+    /* Lovelace reuses card elements across view switches, so a subscription or
+       an interval left running here would leak one per visit. */
+    disconnectedCallback() {
+      if (this._unsub) { try { this._unsub(); } catch (e) { /* already gone */ } }
+      this._unsub = null;
+      this._pending = false;
+      if (this._timer) clearInterval(this._timer);
+      this._timer = null;
+    }
+
+    connectedCallback() {
+      if (this._built) { this._subscribe(); this._startRotation(); }
+    }
+
     /* Set a tile in one call so no tile can be left half-updated. */
-    _set(key, { label, pill, tone, state, ctx, amber, click }) {
-      const t = this._tiles[key];
-      if (!t) return;
-      HC.setText(t.label, label);
-      HC.setText(t.pill, pill);
-      t.pill.setTone(tone);
-      HC.setText(t.state, state);
-      HC.setText(t.ctx, ctx);
-      t.t.className = "card tone att tone-" + (tone === "bad" ? "bad"
-        : tone === "warn" || tone === "alert" ? "warn"
-        : tone === "good" ? "good" : "idle")
-        + (amber ? " amber" : "");
-      if (this._config.animate !== false) t.t.classList.add("in");
-      t.t.onclick = click || null;
+    _set(tile, spec) {
+      /* `subject` is what the tile is about, not what it says. Changing from
+         "38m left" to "22m left" is the same subject and must not fade. */
+      const swapped = tile.subject !== spec.subject;
+      tile.subject = spec.subject;
+
+      HC.setText(tile.label, spec.label);
+      HC.setText(tile.pill, spec.pill);
+      tile.pill.setTone(spec.tone);
+      HC.setText(tile.state, spec.state);
+      HC.setText(tile.ctx, spec.ctx);
+
+      const tone = spec.tone === "bad" ? "bad"
+        : spec.tone === "warn" || spec.tone === "alert" ? "warn"
+        : spec.tone === "good" ? "good"
+        : spec.tone === "cool" ? "cool"
+        : spec.tone === "active" ? "active" : "idle";
+      tile.t.className = "card tone att tone-" + tone + (spec.amber ? " amber" : "");
+      if (this._config.animate !== false) tile.t.classList.add("in");
+      if (swapped && this._settled) {
+        /* Retrigger the fade: the class has to leave and come back, and
+           reading offsetWidth is what forces the style flush between. */
+        tile.t.classList.remove("swap");
+        void tile.t.offsetWidth;
+        tile.t.classList.add("swap");
+      }
+      tile.t.onclick = spec.entity ? () => this.moreInfo(spec.entity) : null;
     }
 
     update() {
-      if (this._tiles.doors) this._doors();
-      if (this._tiles.bins) this._bins();
-      if (this._tiles.laundry) this._laundry();
-      if (this._tiles.batteries) this._batteries();
+      this._subscribe();
+
+      const pool = HC.contextCandidates(this.hass, this._config, this._th, {
+        forecast: this._forecast,
+        weatherEntity: this._weatherEntity
+      });
+      const wanted = this._tiles.filter((t) => t.slot === "context").length;
+      const picks = HC.fillSlots(pool, wanted, this._tick);
+
+      let i = 0;
+      for (const tile of this._tiles) {
+        if (tile.slot === "doors") this._set(tile, this._doors());
+        else if (tile.slot === "batteries") this._set(tile, this._batteries());
+        else this._set(tile, this._contextTile(picks[i++]));
+      }
+      /* First paint should not fade -- the row already has its entry
+         animation, and running both makes the tiles arrive twice. */
+      this._settled = true;
+    }
+
+    /* A candidate, or the honest version of an empty stage. */
+    _contextTile(pick) {
+      if (!pick) {
+        return { subject: "quiet", label: "All quiet", pill: "NOTHING DUE",
+                 tone: "idle", state: "Nothing on",
+                 ctx: "No bins, no washing, nothing to chase" };
+      }
+      return Object.assign({ subject: pick.key }, pick);
     }
 
     /* ---- doors & windows ------------------------------------------- */
@@ -97,119 +223,29 @@
       const open = live.filter((x) => x.r.on);
 
       if (!live.length) {
-        return this._set("doors", {
-          label: "Doors & windows", pill: "GAP", tone: "idle",
-          state: "No data", ctx: "No contact sensors reporting"
-        });
+        return { subject: "doors-gap", label: "Doors & windows", pill: "GAP",
+                 tone: "idle", state: "No data",
+                 ctx: "No contact sensors reporting" };
       }
 
-      const last = live
-        .map((x) => x.r)
+      const last = live.map((x) => x.r)
         .sort((a, b) => new Date(b.changed) - new Date(a.changed))[0];
 
       if (open.length) {
-        this._set("doors", {
-          label: "Doors & windows",
+        return {
+          subject: "doors-open", label: "Doors & windows",
           pill: `${open.length} OPEN`, tone: "warn", amber: true,
           state: open.length === 1 ? open[0].o.name : `${open.length} open`,
           ctx: open.map((x) => x.o.name).join(" · "),
-          click: () => this.moreInfo(open[0].o.entity)
-        });
-      } else {
-        this._set("doors", {
-          label: "Doors & windows", pill: "SECURE", tone: "good",
-          state: "All closed",
-          ctx: `${live.length} sensors · ${last.name.replace(/( Sensor)?( Door| Contact)?$/i, "")} closed ${HC.ago(last.changed)}`,
-          click: () => this.moreInfo(live[0].o.entity)
-        });
+          entity: open[0].o.entity
+        };
       }
-    }
-
-    /* ---- bins ------------------------------------------------------- */
-    _bins() {
-      const cfg = HC.roles(this._config, "bins", this.hass);
-      const streams = (cfg.streams || []).map((s) => {
-        const r = HC.read(this.hass, s.entity);
-        const days = r.ok ? HC.num(r.attrs[cfg.days_attr]) : null;
-        return { name: s.name, entity: s.entity, days, r };
-      }).filter((s) => s.days != null);
-
-      if (!streams.length) {
-        return this._set("bins", {
-          label: "Bins", pill: "GAP", tone: "idle",
-          state: "No data", ctx: "Waste schedule not reporting"
-        });
-      }
-
-      const soonest = Math.min(...streams.map((s) => s.days));
-      const due = streams.filter((s) => s.days === soonest);
-      const names = due.map((s) => s.name).join(" + ");
-      const tonight = soonest <= 1;
-
-      this._set("bins", {
-        label: "Bins",
-        pill: tonight ? (soonest === 0 ? "TODAY" : "TONIGHT") : `IN ${soonest} DAYS`,
-        tone: tonight ? "alert" : "idle",
-        amber: tonight,
-        state: names,
-        ctx: tonight
-          ? `Out by 6am ${soonest === 0 ? "today" : "tomorrow"} · ${due.length > 1 ? "recycling week" : "general only"}`
-          : `Next collection in ${soonest} days`,
-        click: () => this.moreInfo(due[0].entity)
-      });
-    }
-
-    /* ---- laundry ---------------------------------------------------- */
-    _laundry() {
-      const cfg = HC.roles(this._config, "laundry", this.hass);
-      const status = HC.read(this.hass, cfg.status);
-      const remaining = HC.read(this.hass, cfg.remaining);
-      const lastEvent = HC.read(this.hass, cfg.last_event);
-
-      if (status.absent) {
-        return this._set("laundry", {
-          label: "Laundry", pill: "GAP", tone: "idle",
-          state: "No data", ctx: "Washer not reporting"
-        });
-      }
-
-      const running = (cfg.running_states || []).includes(status.state);
-
-      if (running) {
-        const mins = remaining.ok ? remaining.value : null;
-        return this._set("laundry", {
-          label: "Laundry", pill: "RUNNING", tone: "good",
-          state: mins != null ? HC.duration(mins) + " left" : "Running",
-          ctx: `Cycle in progress`,
-          click: () => this.moreInfo(cfg.status)
-        });
-      }
-
-      /* "Unload me" without a door sensor: the machine has stopped and the
-         finish is recent. It is a guess and it is labelled as one by fading
-         out after the window rather than nagging indefinitely. */
-      const finishedAt = lastEvent.ok ? new Date(lastEvent.state) : null;
-      const hoursSince = finishedAt && !isNaN(finishedAt)
-        ? (Date.now() - finishedAt.getTime()) / 3600000 : null;
-      const unloadWindow = Number(this._config.unload_window_hours || 3);
-
-      if (hoursSince != null && hoursSince < unloadWindow) {
-        return this._set("laundry", {
-          label: "Laundry", pill: "UNLOAD ME", tone: "warn", amber: true,
-          state: "Finished",
-          ctx: `Cycle finished ${HC.ago(finishedAt)}`,
-          click: () => this.moreInfo(cfg.status)
-        });
-      }
-
-      this._set("laundry", {
-        label: "Laundry", pill: "IDLE", tone: "idle",
-        state: "Off",
-        ctx: finishedAt && !isNaN(finishedAt)
-          ? `Last cycle finished ${HC.ago(finishedAt)}`
-          : "No recent cycle",
-        click: () => this.moreInfo(cfg.status)
-      });
+      return {
+        subject: "doors-shut", label: "Doors & windows", pill: "SECURE",
+        tone: "good", state: "All closed",
+        ctx: `${live.length} sensors · ${last.name.replace(/( Sensor)?( Door| Contact)?$/i, "")} closed ${HC.ago(last.changed)}`,
+        entity: live[0].o.entity
+      };
     }
 
     /* ---- batteries --------------------------------------------------- */
@@ -219,32 +255,24 @@
       const low = this._th.battery_low;
 
       if (!all.length) {
-        return this._set("batteries", {
-          label: "Batteries", pill: "GAP", tone: "idle",
-          state: "No data", ctx: "No battery sensors found"
-        });
+        return { subject: "bat-gap", label: "Batteries", pill: "GAP",
+                 tone: "idle", state: "No data",
+                 ctx: "No battery sensors found" };
       }
 
       const under = all.filter((b) => b.value < low);
       const lowest = all[0];
       const shortName = (n) => n.replace(/ Battery( Level)?$/i, "");
 
-      if (under.length) {
-        this._set("batteries", {
-          label: "Batteries",
-          pill: `${under.length} LOW`, tone: "bad",
-          state: `${Math.round(lowest.value)} % lowest`,
-          ctx: `${shortName(lowest.name)} · ${under.length} under the ${low}% line`,
-          click: () => this.moreInfo(lowest.id)
-        });
-      } else {
-        this._set("batteries", {
-          label: "Batteries", pill: "NONE LOW", tone: "good",
-          state: `${Math.round(lowest.value)} % lowest`,
-          ctx: `${shortName(lowest.name)} · nothing under the ${low}% line`,
-          click: () => this.moreInfo(lowest.id)
-        });
-      }
+      return under.length
+        ? { subject: "bat-low", label: "Batteries", pill: `${under.length} LOW`,
+            tone: "bad", state: `${Math.round(lowest.value)} % lowest`,
+            ctx: `${shortName(lowest.name)} · ${under.length} under the ${low}% line`,
+            entity: lowest.id }
+        : { subject: "bat-ok", label: "Batteries", pill: "NONE LOW",
+            tone: "good", state: `${Math.round(lowest.value)} % lowest`,
+            ctx: `${shortName(lowest.name)} · nothing under the ${low}% line`,
+            entity: lowest.id };
     }
 
     getCardSize() { return 3; }
@@ -252,6 +280,6 @@
 
   HC.define("hc-attention", Attention, {
     name: "Attention row",
-    description: "Doors, bins, laundry and low batteries in one row.",
+    description: "Doors and batteries, plus what the hour makes worth knowing.",
     preview: true
   });

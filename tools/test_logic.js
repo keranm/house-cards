@@ -121,5 +121,91 @@ for (const s of roles.bins.streams) {
   check(`bin ${s.name} has a daysTo`, r.ok && HC.num(r.attrs.daysTo) != null, s.entity);
 }
 
+console.log("\ncontext roles");
+for (const [key, id] of Object.entries(roles.context)) {
+  check(`context.${key} resolves`, hass.states[id] != null, id);
+}
+
+console.log("\nbin window");
+/* Collection is a Tuesday here, so daysTo is shifted to stand in for other
+   days rather than waiting a week to find out the window is wrong. */
+const binsAt = (shift, hour) => {
+  const st = JSON.parse(JSON.stringify(hass.states));
+  for (const id in st) {
+    const a = st[id].attributes;
+    if (id.includes("waste_collection") && typeof a.daysTo === "number") a.daysTo += shift;
+  }
+  return HC.binWindow({ states: st }, roles.bins, new Date(2026, 7, 11, hour, 5));
+};
+check("shut the morning before, before 7am", binsAt(1, 6).inWindow === false);
+check("open from 7am the day before", binsAt(1, 7).inWindow === true);
+check("still open at 10pm the night before", binsAt(1, 22).inWindow === true);
+check("open in the small hours of collection day", binsAt(0, 3).inWindow === true);
+check("shut once the truck has been", binsAt(0, 7).inWindow === false);
+check("and stays shut all day after", binsAt(0, 18).inWindow === false);
+check("a past-7am collection day is 'collected', not 'nothing due'",
+      binsAt(0, 9).collected === true);
+check("both streams are named on a recycling week",
+      binsAt(0, 3).names === "Rubbish + Recycling", binsAt(0, 3).names);
+
+console.log("\ncontext pool");
+const cconf = { roles };
+const poolAt = (hour, extra) => HC.contextCandidates(hass, cconf, th,
+  Object.assign({ now: new Date(2026, 7, 11, hour, 5) }, extra || {}));
+
+check("day parts split by local hour",
+      HC.dayPart(new Date(2026, 7, 11, 7)) === "morning"
+   && HC.dayPart(new Date(2026, 7, 11, 16)) === "afternoon"
+   && HC.dayPart(new Date(2026, 7, 11, 23)) === "late");
+check("bin night is sticky, so it cannot rotate away",
+      poolAt(3).sticky.some((c) => c.key === "bins"));
+check("bins leave the row entirely after collection",
+      !poolAt(9).sticky.some((c) => c.key === "bins")
+   && !poolAt(9).ambient.some((c) => c.key === "bins_next"));
+check("every part of the day has something to say",
+      [1, 6, 9, 12, 16, 20, 23].every((h) => poolAt(h).ambient.length >= 2),
+      [1, 6, 9, 12, 16, 20, 23].map((h) => `${h}:${poolAt(h).ambient.length}`).join(" "));
+check("no candidate is offered at a weight of zero",
+      poolAt(12).ambient.every((c) => c.weight > 0));
+check("the weather leads the morning",
+      poolAt(7, { forecast: [{ condition: "sunny", temperature: 15, templow: 4,
+                               precipitation: 0 }] }).ambient[0].key === "weather");
+check("no weather forecast means no weather tile, not an empty one",
+      !poolAt(7).ambient.some((c) => c.key === "weather"));
+
+/* The CO2 candidate must read the same sensors the room grid does -- an early
+   draft of this row picked its own and could call the air fine while the room
+   card called it stuffy. */
+const worst = HC.worstAir(hass, cconf);
+check("worst air comes from the room map",
+      worst && roles.rooms.some((r) => r.co2 === worst.entity), worst && worst.entity);
+check("stuffy rotates, bad sticks",
+      poolAt(7).ambient.some((c) => c.key === "air")
+   && !poolAt(7).sticky.some((c) => c.key === "air"),
+      `worst ${worst && worst.ppm}ppm vs ok ${th.room_co2} / bad ${th.room_co2_bad}`);
+
+console.log("\nslot filling");
+const pool = poolAt(12);
+check("a full row never shows the same subject twice", (() => {
+  for (let t = 0; t < 12; t++) {
+    const keys = HC.fillSlots(pool, 2, t).map((p) => p.key);
+    if (new Set(keys).size !== keys.length) return false;
+  }
+  return true;
+})());
+check("rotation reaches every ambient candidate", (() => {
+  const seen = new Set();
+  for (let t = 0; t < pool.ambient.length * 2; t++) {
+    HC.fillSlots(pool, 2, t).forEach((p) => seen.add(p.key));
+  }
+  return seen.size === pool.ambient.length;
+})(), `${pool.ambient.length} candidates`);
+check("sticky facts take their slots first", (() => {
+  const p = poolAt(3);                       // bin night
+  return HC.fillSlots(p, 2, 99)[0].key === "bins";
+})());
+check("an empty pool asks for nothing rather than throwing",
+      HC.fillSlots({ sticky: [], ambient: [] }, 2, 5).length === 0);
+
 console.log(failures ? `\n${failures} FAILED\n` : "\nall passed\n");
 process.exit(failures ? 1 : 0);

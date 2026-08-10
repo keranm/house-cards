@@ -30,8 +30,13 @@
 <div class="page" id="page"></div>
 
 <script src="./preview_states.js"></script>
+<script src="./preview_roles.js"></script>
 <script src="../dist/house-cards.js"></script>
 <script>
+  const HOUSE = window.PREVIEW_HOUSE;
+  const TH_HELPERS = Object.fromEntries(Object.entries(HOUSE.thresholds)
+    .filter(([, v]) => v.helper).map(([k, v]) => [k, v.helper]));
+
   const hass = {
     states: Object.fromEntries(window.PREVIEW_STATES.map((s) => [s.entity_id, s])),
     themes: { darkMode: new URLSearchParams(location.search).has("dark") },
@@ -54,9 +59,12 @@
 
   const page = document.getElementById("page");
 
+  /* Cards are given the same roles the real dashboard injects, so the preview
+     shows this house rather than a row of GAP badges. */
   const make = (tag, config, parent) => {
     const el = document.createElement(tag);
-    el.setConfig(config || {});
+    el.setConfig(Object.assign({ roles: HOUSE.roles, threshold_helpers: TH_HELPERS },
+                               config || {}));
     el.hass = hass;
     (parent || page).appendChild(el);
     return el;

@@ -32,6 +32,10 @@
     bins: { streams: [], days_attr: "daysTo" },
     laundry: {},
     mail: {},
+    /* Feeds the rotating half of the attention row -- see 09-context.js. Every
+       key is optional: a candidate whose entities are absent simply does not
+       audition, which is why this can ship empty. */
+    context: {},
     batteries: { discover: true, exclude_prefixes: [], exclude: [] },
     lights: { discover: true, exclude: [] },
     house: {}

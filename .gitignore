@@ -6,3 +6,5 @@ tools/registry.json
 tools/preview_states.js
 .DS_Store
 tools/house_roles.json
+# Same map as house_roles.json, in the form the preview harness loads it.
+tools/preview_roles.js
