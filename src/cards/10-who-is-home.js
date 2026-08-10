@@ -36,7 +36,7 @@
   class WhoIsHome extends HC.Card {
     build() {
       const cfg = this._config;
-      this._roles = HC.roles(cfg, "people");
+      this._roles = HC.roles(cfg, "people", this.hass);
 
       const style = HC.el("style");
       style.textContent = WHO_CSS;

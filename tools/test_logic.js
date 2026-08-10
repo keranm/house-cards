@@ -43,8 +43,13 @@ check("duration under an hour", HC.duration(45) === "45m");
 check("duration over an hour", HC.duration(70) === "1h 10m");
 
 console.log("\nthresholds");
-const th = HC.thresholds(hass);
+const house = JSON.parse(fs.readFileSync(path.join(__dirname, "house_roles.json")));
+const helpers = Object.fromEntries(Object.entries(house.thresholds)
+  .filter(([, v]) => v.helper).map(([k, v]) => [k, v.helper]));
+const th = HC.thresholds(hass, {}, helpers);
 check("battery_low defaults to 40", th.battery_low === 40);
+check("a literal beats a helper (documented order)",
+      HC.thresholds(hass, { room_co2: 1234 }, helpers).room_co2 === 1234);
 check("room_co2 comes from the climate helper",
       th.room_co2 === 800 && th.room_co2__from === "input_number.climate_co2_ok",
       `got ${th.room_co2} from ${th.room_co2__from}`);
@@ -54,7 +59,9 @@ const thOver = HC.thresholds(hass, { battery_low: 25 });
 check("card config overrides a threshold", thOver.battery_low === 25);
 
 console.log("\nrole resolution");
-const roles = HC.ROLES;
+/* The bundle ships generic; the instance map lives beside it and is what the
+   dashboard injects, so that is what these assertions check. */
+const roles = house.roles;
 check("four people", roles.people.length === 4);
 for (const p of roles.people) {
   const r = HC.read(hass, p.person);

@@ -58,7 +58,7 @@
 
     build() {
       const cfg = this._config;
-      this._rooms = HC.roles(cfg, "rooms");
+      this._rooms = HC.roles(cfg, "rooms", this.hass);
 
       const style = HC.el("style");
       style.textContent = ROOM_CSS;

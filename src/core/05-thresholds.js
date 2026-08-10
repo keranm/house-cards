@@ -10,24 +10,33 @@
    *
    * Resolution order per threshold:
    *   1. the card's own yaml    (`thresholds: {battery_low: 30}`)
-   *   2. an input_number helper, when one exists and holds a number
+   *   2. a helper entity named in `threshold_helpers`, if it holds a number
    *   3. the built-in default from HC.THRESHOLDS
    *
-   * Step 2 matters: `room_co2` is already `input_number.climate_co2_ok`, the
-   * helper the Climate Brain acts on. Reading it means the dashboard cannot
-   * call the air acceptable at a number the brain disagrees with.
+   * Step 2 is the important one. Where a controller already acts on a number,
+   * point the card at that helper rather than copying its value:
+   *
+   *     threshold_helpers:
+   *       room_co2: input_number.climate_co2_ok
+   *
+   * The dashboard then cannot call the air acceptable at a figure the thing
+   * actually running the fans disagrees with.
    */
 
-  HC.thresholds = (hass, overrides) => {
+  HC.thresholds = (hass, overrides, helpers) => {
     const out = {};
     for (const key in HC.THRESHOLDS) {
       const spec = HC.THRESHOLDS[key];
       let value = spec.default;
       let from = "default";
 
-      if (spec.helper && hass && hass.states[spec.helper]) {
-        const v = HC.num(hass.states[spec.helper].state);
-        if (v != null) { value = v; from = spec.helper; }
+      /* The helper may be declared here or supplied by the card's yaml. Yaml
+         wins: the kit ships knowing no entity ids, so on a real instance the
+         linkage arrives that way. */
+      const helper = (helpers && helpers[key]) || spec.helper;
+      if (helper && hass && hass.states[helper]) {
+        const v = HC.num(hass.states[helper].state);
+        if (v != null) { value = v; from = helper; }
       }
       if (overrides && overrides[key] != null) {
         const v = HC.num(overrides[key]);

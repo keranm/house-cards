@@ -38,7 +38,7 @@
 
     build() {
       const cfg = this._config;
-      this._cfgBat = HC.roles(cfg, "batteries");
+      this._cfgBat = HC.roles(cfg, "batteries", this.hass);
 
       const style = HC.el("style");
       style.textContent = BAT_CSS;

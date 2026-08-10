@@ -51,7 +51,7 @@
 
   /* Discovery for the open-ended roles (batteries, lights) where enumerating
      every entity by hand would rot the first time a device is added. */
-  HC.discover = {
+  HC.discover = Object.assign(HC.discover || {}, {
     batteries(hass, cfg) {
       cfg = cfg || {};
       const excl = new Set(cfg.exclude || []);
@@ -84,14 +84,22 @@
       }
       return out.sort((a, b) => a.name.localeCompare(b.name));
     }
-  };
+  });
 
   /* Merge a card's yaml over the generated defaults, one level deep. Lets a
      card override `roles.energy.solar_power` without restating the rest. */
-  HC.roles = (config, key) => {
-    const base = HC.ROLES[key];
+  HC.roles = (config, key, hass) => {
     const over = (config && config.roles && config.roles[key]) || null;
-    if (!over) return base;
-    if (Array.isArray(base) || Array.isArray(over)) return over;
-    return Object.assign({}, base, over);
+    if (over) {
+      const base = HC.ROLES[key];
+      if (!base || Array.isArray(base) || Array.isArray(over)) return over;
+      return Object.assign({}, base, over);
+    }
+
+    const base = HC.ROLES[key];
+    /* A null default means "discover it" -- the kit ships with no house baked
+       in, so people and rooms come from the instance unless yaml says
+       otherwise. */
+    if (base == null && hass && HC.discover[key]) return HC.discover[key](hass);
+    return base;
   };

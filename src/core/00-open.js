@@ -1,4 +1,4 @@
-/* house-cards — a Lovelace card kit for the family dashboards.
+/* house-cards — a Lovelace card kit for family home dashboards.
  *
  * One IIFE split across numbered files purely for editing comfort: 00 opens it,
  * 99 closes it, and everything between hangs off the `HC` namespace, so the

@@ -59,7 +59,8 @@
         sheet.textContent = HC.CSS;
         HC.add(this._root, sheet);
 
-        this._th = HC.thresholds(this._hass, this._config.thresholds);
+        this._th = HC.thresholds(this._hass, this._config.thresholds,
+                                 this._config.threshold_helpers);
         const tree = this.build();
         if (tree) {
           if (this._config.animate !== false) {
@@ -74,7 +75,8 @@
 
       /* Thresholds can move -- they are helpers a person can drag -- so they
          are re-read on every update, not frozen at build time. */
-      this._th = HC.thresholds(this._hass, this._config.thresholds);
+      this._th = HC.thresholds(this._hass, this._config.thresholds,
+                               this._config.threshold_helpers);
       this.update();
     }
 

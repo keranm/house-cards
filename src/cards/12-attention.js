@@ -91,7 +91,7 @@
 
     /* ---- doors & windows ------------------------------------------- */
     _doors() {
-      const roles = HC.roles(this._config, "openings");
+      const roles = HC.roles(this._config, "openings", this.hass);
       const reads = roles.map((o) => ({ o, r: HC.read(this.hass, o.entity) }));
       const live = reads.filter((x) => x.r.ok);
       const open = live.filter((x) => x.r.on);
@@ -127,7 +127,7 @@
 
     /* ---- bins ------------------------------------------------------- */
     _bins() {
-      const cfg = HC.roles(this._config, "bins");
+      const cfg = HC.roles(this._config, "bins", this.hass);
       const streams = (cfg.streams || []).map((s) => {
         const r = HC.read(this.hass, s.entity);
         const days = r.ok ? HC.num(r.attrs[cfg.days_attr]) : null;
@@ -161,7 +161,7 @@
 
     /* ---- laundry ---------------------------------------------------- */
     _laundry() {
-      const cfg = HC.roles(this._config, "laundry");
+      const cfg = HC.roles(this._config, "laundry", this.hass);
       const status = HC.read(this.hass, cfg.status);
       const remaining = HC.read(this.hass, cfg.remaining);
       const lastEvent = HC.read(this.hass, cfg.last_event);
@@ -214,7 +214,7 @@
 
     /* ---- batteries --------------------------------------------------- */
     _batteries() {
-      const cfg = HC.roles(this._config, "batteries");
+      const cfg = HC.roles(this._config, "batteries", this.hass);
       const all = HC.discover.batteries(this.hass, cfg);
       const low = this._th.battery_low;
 

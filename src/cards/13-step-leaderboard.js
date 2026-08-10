@@ -8,12 +8,12 @@
    * weekly and monthly helpers -- so the card is a straight read with no
    * statistics round trip.
    *
-   * Those helpers were created 2026-08-10. Until a full week and month have
-   * passed, week and month are partial by construction: a new phone's week reads
-   * 150 against a day of 2,884 because the weekly helper only started counting
-   * part-way through today. The card labels a range as building rather than
-   * presenting a part-week as a full one, and stops saying so once the range
-   * has had time to fill.
+   * Set `helpers_created` to the date those helpers were first created. Until
+   * a full week and month have elapsed the longer ranges are partial by
+   * construction -- a weekly helper made this morning can report less than
+   * today's own total, which looks like a bug and is not. The card labels a
+   * range as still building, and stops saying so once it has had time to
+   * fill.
    */
 
   const LB_CSS = `
@@ -74,7 +74,7 @@
 
     build() {
       const cfg = this._config;
-      this._people = HC.roles(cfg, "people");
+      this._people = HC.roles(cfg, "people", this.hass);
       if (cfg.range && RANGES[cfg.range]) this._range = cfg.range;
 
       const style = HC.el("style");

@@ -48,7 +48,7 @@
   class EnergyNow extends HC.Card {
     build() {
       const cfg = this._config;
-      this._e = HC.roles(cfg, "energy");
+      this._e = HC.roles(cfg, "energy", this.hass);
 
       const style = HC.el("style");
       style.textContent = EN_CSS;

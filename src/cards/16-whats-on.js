@@ -34,7 +34,7 @@
   class WhatsOn extends HC.Card {
     build() {
       const cfg = this._config;
-      this._cfgLights = HC.roles(cfg, "lights");
+      this._cfgLights = HC.roles(cfg, "lights", this.hass);
 
       const style = HC.el("style");
       style.textContent = WO_CSS;

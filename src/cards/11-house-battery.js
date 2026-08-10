@@ -13,7 +13,7 @@
   class HouseBattery extends HC.Card {
     build() {
       const cfg = this._config;
-      this._e = HC.roles(cfg, "energy");
+      this._e = HC.roles(cfg, "energy", this.hass);
 
       const card = HC.el("div", "card hero tone");
       card.style.padding = "22px 24px";

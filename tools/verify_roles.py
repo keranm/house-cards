@@ -12,7 +12,7 @@ import json, pathlib, re, sys
 HERE = pathlib.Path(__file__).parent
 S = {s["entity_id"]: s for s in json.load(open(HERE / "states.json"))}
 
-js = (HERE.parent / "src" / "core" / "04-roles.generated.js").read_text()
+js = (HERE / "house_roles.json").read_text()
 refs = sorted(set(re.findall(
     r'"((?:sensor|binary_sensor|input_number|input_boolean|input_text|light|'
     r'switch|person|sun|climate|number|event|calendar)\.[a-z0-9_]+)"', js)))

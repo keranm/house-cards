@@ -5,3 +5,4 @@ tools/states.json
 tools/registry.json
 tools/preview_states.js
 .DS_Store
+tools/house_roles.json
