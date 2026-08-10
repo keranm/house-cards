@@ -9,7 +9,7 @@ happily hand you a stale copy of a file you just replaced.
 
 Re-runnable. If the repo is already registered it skips straight to download.
 """
-import json, pathlib, sys, time, urllib.request
+import json, pathlib, subprocess, sys, time, urllib.request
 
 HERE = pathlib.Path(__file__).parent
 sys.path.insert(0, str(HERE))
@@ -51,7 +51,33 @@ if entry is None:
 print(f"repo id={entry.get('id')}  installed={entry.get('installed')}  "
       f"version={entry.get('installed_version')}  available={entry.get('available_version')}")
 
-# Download the newest release. Idempotent: HACS re-downloads happily, and a
+# HACS downloads the newest release IT KNOWS ABOUT, and what it knows about is
+# whatever its last poll found. Cut a release and download straight away and it
+# happily re-fetches the previous tag, reports success, and the byte check at
+# the bottom is the only thing that notices. So: refresh first, and wait until
+# the tag we just pushed is actually the one on offer.
+#
+# The tag has to come from the remote. `gh release create` tags on GitHub and
+# does not write a local tag, so `git describe` here finds nothing at all --
+# which is silent, and leaves this whole check skipped.
+want = subprocess.run(["gh", "release", "view", "--json", "tagName", "-q", ".tagName"],
+                      cwd=HERE.parent, capture_output=True, text=True).stdout.strip()
+if want:
+    print(f"waiting for HACS to see {want} …")
+    for attempt in range(12):
+        if (entry or {}).get("available_version") == want:
+            break
+        try:
+            w.cmd(type="hacs/repository/refresh", repository=str(entry["id"]))
+        except RuntimeError as e:
+            print(f"  refresh returned: {e}")
+        time.sleep(2.5)
+        entry = find() or entry
+    else:
+        print(f"  WARNING: HACS still offers {(entry or {}).get('available_version')!r}")
+    print(f"  available={(entry or {}).get('available_version')}")
+
+# Idempotent: HACS re-downloads happily, and a
 # re-download is exactly what a version bump needs.
 print("downloading …")
 try:
