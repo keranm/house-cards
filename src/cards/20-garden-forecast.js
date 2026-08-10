@@ -233,7 +233,11 @@
       const u = HC.num(maxUv.uv_index) || 0;
       if (u >= 8) bits.push(`UV peaks at ${HC.dec(u, 1)} ${name(maxUv)} — shade anything just planted`);
 
-      HC.setText(this._verdict, bits.join(". ") + ".");
+      /* Each clause is built independently, so each has to start as a
+         sentence -- joining them raw produced "...Saturday. breeziest
+         Tuesday...". */
+      const sentence = (t) => t.charAt(0).toUpperCase() + t.slice(1);
+      HC.setText(this._verdict, bits.map(sentence).join(". ") + ".");
       HC.setText(this._sub, `${days.length} days`);
     }
 
