@@ -16,7 +16,13 @@
    */
 
   const ZONE_CSS = `
-  .zones { display: flex; flex-direction: column; gap: 10px; }
+  /* Two-up by default. A zone row is short and the card is wide, so one per
+     line wasted half the width and pushed the bedrooms below the fold. */
+  .zones {
+    display: grid; gap: 10px;
+    grid-template-columns: repeat(var(--zcols, 2), minmax(0, 1fr));
+  }
+  @media (max-width: 780px) { .zones { grid-template-columns: 1fr; } }
   .zone {
     display: grid; grid-template-columns: 1fr 96px; gap: 12px 16px;
     align-items: center; padding: 12px 16px;
@@ -77,6 +83,7 @@
       HC.add(head, HC.el("span", "title", cfg.title || "Air zones"), this._headNote);
 
       const list = HC.el("div", "zones");
+      list.style.setProperty("--zcols", String(cfg.columns || 2));
       this._rows = this._zones.map((z) => {
         const row = HC.el("div", "zone");
 
