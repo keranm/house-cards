@@ -329,6 +329,22 @@ check("solar short of the load, grid topping up", closes([1.0, 2.5, 1.5, 0, 0, 0
 check("everything at zero", closes([0, 0, 0, 0, 0, 0]));
 check("solar-to-grid only appears when exporting",
       split(6, 1, 0, 0, 0, 0).sg === 0 && split(6, 1, 0, 4, 0, 0).sg > 0);
+check("a few watts of grid is a real flow, not noise",
+      split(0.16, 0.327, 0.009, 0, 0, 0.158).gh > 0);
+
+/* The deadbands used to be set well above the inverter's resolution, so small
+   real flows were discarded: a 9 W import printed "0 W" behind a grey line
+   while FoxESS was reporting 0.009 the whole time. */
+const batAt = (chg, dis) => HC.batteryFlow(
+  { states: { c: { state: String(chg), attributes: {} },
+              d: { state: String(dis), attributes: {} } } },
+  { battery_charge_power: "c", battery_discharge_power: "d" });
+check("a pack trickling 40 W is discharging, not idle",
+      batAt(0, 0.04).dir === "discharge");
+check("a pack taking 20 W is charging, not idle",
+      batAt(0.02, 0).dir === "charge");
+check("a genuinely still pack is still idle", batAt(0, 0).dir === "idle");
+check("sub-resolution readings stay idle", batAt(0, 0.002).dir === "idle");
 check("grid-to-battery only appears when importing",
       split(0, 0.4, 0, 0, 3, 0).gb === 0 && split(0, 0.4, 3.4, 0, 3, 0).gb > 0);
 

@@ -14,7 +14,13 @@
    * infer direction when the pair is available.
    */
 
-  const BAT_DEADBAND = 0.05;   // kW; below this the pack is neither
+  /* kW; below this the pack is neither charging nor discharging.
+     Was 0.05, which called a pack trickling 40 W "idle" -- the same clipping
+     that made the energy card print 0 W for a real 9 W of grid import. Ten
+     watts is above the point where charge and discharge can both read small
+     and non-zero on the same sample, and below anything a person would call
+     nothing happening. */
+  const BAT_DEADBAND = 0.01;
 
   HC.batteryFlow = (hass, energy) => {
     const charge = HC.read(hass, energy.battery_charge_power).value;

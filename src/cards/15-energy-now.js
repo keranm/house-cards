@@ -106,8 +106,22 @@
     battery_home:  () => elbow(NODES.battery, NODES.home, 1, CY + LANE, false, true)
   };
 
-  /* Below this the reading is noise, not a flow. */
-  const DEADBAND = 0.02;   // kW
+  /* Two thresholds, because two different questions are being asked.
+   *
+   * DEADBAND decides whether a flow exists at all -- whether to draw the line
+   * and print the number. It sits at the inverter's own resolution. FoxESS
+   * reports kW to three decimals and gives a true 0.0 when a path is idle, so
+   * there is no dither to filter out and anything above a watt is real. This
+   * was 0.02 (20 W), which quietly threw away every small grid flow: a house
+   * pulling 9 W off the grid drew a grey line and printed "0 W" while the
+   * inverter was reporting 0.009 the whole time.
+   *
+   * HEADLINE decides whether the house deserves to be *called* importing. That
+   * is a judgement, not a measurement, and a few watts either way is not one:
+   * a house drawing 9 W is self-sufficient in every sense a person means.
+   */
+  const DEADBAND = 0.001;   // kW -- draw it
+  const HEADLINE = 0.1;     // kW -- name it
 
   class EnergyNow extends HC.Card {
     build() {
@@ -252,10 +266,13 @@
       const charging = flow.dir === "charge";
       const discharging = flow.dir === "discharge";
 
-      HC.setText(this._liveText, importing ? "IMPORTING"
-        : exporting ? "EXPORTING" : "SELF-SUFFICIENT");
-      this._liveText.style.color = importing ? "var(--hc-amber-deep)" : "var(--hc-green-deep)";
-      this._liveDot.style.background = importing ? "var(--hc-amber)" : "var(--hc-green)";
+      /* The headline is about the shape of the day, not the last watt. */
+      const drawingOn = imp != null && imp > HEADLINE;
+      const sendingBack = exp != null && exp > HEADLINE;
+      HC.setText(this._liveText, drawingOn ? "IMPORTING"
+        : sendingBack ? "EXPORTING" : "SELF-SUFFICIENT");
+      this._liveText.style.color = drawingOn ? "var(--hc-amber-deep)" : "var(--hc-green-deep)";
+      this._liveDot.style.background = drawingOn ? "var(--hc-amber)" : "var(--hc-green)";
 
       const set = (key, kw) => {
         const n = this._nodes[key];
@@ -264,7 +281,19 @@
       };
       set("solar", solar);
       set("home", load);
-      set("grid", importing ? imp : exporting ? exp : 0);
+
+      /* The grid is the one node whose number is meaningless without a
+         direction -- "9 W" is a different fact depending on which way it is
+         going. The arrow says which, and the ring colours to match: red for
+         power bought, green for power sold, grey for a meter sitting still. */
+      const gridNode = this._nodes.grid;
+      if (gridNode) {
+        const kw = importing ? imp : exporting ? exp : 0;
+        gridNode.value.textContent =
+          (importing ? "↓ " : exporting ? "↑ " : "") + HC.powerText(kw);
+        gridNode.circle.setAttribute("stroke",
+          importing ? "var(--hc-red)" : exporting ? "var(--hc-green)" : "var(--hc-grey)");
+      }
       if (this._nodes.battery) {
         this._nodes.battery.value.textContent = soc == null ? "--" : Math.round(soc) + "%";
       }
