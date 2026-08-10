@@ -36,9 +36,12 @@
 
   const powerText = (kw) => { const p = power(kw); return `${p.value} ${p.unit}`; };
 
-  /* "3h 20m" / "45m" / "2m". Used for time remaining and time until. */
+  /* "3h 20m" / "45m" / "2m" / "24s". Used for time remaining and time until.
+     Sub-minute matters: a garden tap that ran for 0.4 min is a real 24-second
+     run, and rounding it to "0m" reads as "did not run". */
   const duration = (mins) => {
     if (mins == null || !isFinite(mins)) return "--";
+    if (mins > 0 && mins < 1) return `${Math.max(1, Math.round(mins * 60))}s`;
     const m = Math.max(0, Math.round(mins));
     if (m < 60) return `${m}m`;
     const h = Math.floor(m / 60);

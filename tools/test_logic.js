@@ -40,6 +40,8 @@ check("power below 1kW reads in W", HC.powerText(0.285) === "285 W");
 check("power above 1kW reads in kW", HC.powerText(1.923) === "1.92 kW");
 check("commas group thousands", HC.commas(4387) === "4,387");
 check("duration under an hour", HC.duration(45) === "45m");
+check("sub-minute duration reads in seconds", HC.duration(0.4) === "24s");
+check("zero duration stays zero", HC.duration(0) === "0m");
 check("duration over an hour", HC.duration(70) === "1h 10m");
 
 console.log("\nthresholds");
