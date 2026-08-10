@@ -29,14 +29,19 @@
      by twenty pixels every time the washer finished and the slot rotated on. */
   .att { display: flex; flex-direction: column; gap: 6px; cursor: pointer;
          position: relative; overflow: hidden; min-height: 132px; }
+  /* Both halves refuse to wrap. Without it "14m left" breaks across two lines
+     the moment the finish time is beside it in a narrow column, and the tile
+     grows a line that none of its neighbours have. */
   .att .staterow { display: flex; align-items: baseline; justify-content: space-between;
-                   gap: 10px; margin-top: 6px; }
+                   gap: 10px; margin-top: 6px; flex-wrap: nowrap; }
   .att .state {
     font-family: var(--hc-mono); font-size: 20px; font-weight: 600;
-    color: var(--hc-ink);
+    color: var(--hc-ink); white-space: nowrap;
   }
+  /* Last in, first out: in a tile too narrow for both, the countdown is what
+     matters and the finish time is the detail that goes. */
   .att .aside { font-family: var(--hc-mono); font-size: 11px; color: var(--hc-muted);
-                white-space: nowrap; }
+                white-space: nowrap; min-width: 0; overflow: hidden; }
   .att .ctx { font-size: 13px; color: var(--hc-muted); margin-top: 4px; }
 
   /* ---- cycle strip ---- *

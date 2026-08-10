@@ -23,7 +23,18 @@ FORBIDDEN = {"dashboard-house", "lovelace", "home2", "myhealth-dashboard"}
 if TARGET in FORBIDDEN or not TARGET:
     sys.exit(f"refusing to write to {TARGET!r}")
 
-dash = json.loads((HERE / "house_dash.json").read_text())
+DASH = HERE / "house_dash.json"
+ROLES = HERE / "house_roles.json"
+
+# house_dash.json is generated FROM house_roles.json by build_dash.py, and a
+# deploy of a stale one fails in the worst way available: the bundle ships, the
+# cards load, everything reports success, and one card quietly runs on last
+# week's entity map. That is exactly how the laundry cycle strip was shipped
+# and then didn't appear -- gen_roles.py had run, build_dash.py had not.
+if DASH.exists() and ROLES.exists() and DASH.stat().st_mtime < ROLES.stat().st_mtime:
+    sys.exit(f"{DASH.name} is older than {ROLES.name} -- run build_dash.py first")
+
+dash = json.loads(DASH.read_text())
 
 w = WS()
 
