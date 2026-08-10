@@ -63,6 +63,7 @@
     gap: 12px; padding-top: 12px; border-top: 1px solid var(--hc-rule);
   }
   .znote { font-size: 13px; color: var(--hc-muted); }
+  .zspacer { visibility: hidden; }
   `;
 
   /* Below this a damper is doing nothing useful and the row dims. */
@@ -72,7 +73,26 @@
     build() {
       const cfg = this._config;
       const rooms = HC.roles(cfg, "rooms", this.hass) || [];
-      this._zones = rooms.filter((r) => r.damper);
+      const withDamper = rooms.filter((r) => r.damper);
+
+      /* `order` is a list of room keys, and a null in it is a deliberate blank
+         cell. That is how the living areas and the bedrooms end up as two
+         visual groups without inventing a heading for each -- the gap does the
+         grouping. Unlisted zones follow, so adding a damper cannot make one
+         silently disappear. */
+      if (Array.isArray(cfg.order)) {
+        const byKey = new Map(withDamper.map((r) => [r.key, r]));
+        const seq = [];
+        for (const key of cfg.order) {
+          if (key == null) { seq.push(null); continue; }
+          const room = byKey.get(key);
+          if (room) { seq.push(room); byKey.delete(key); }
+        }
+        for (const left of byKey.values()) seq.push(left);
+        this._zones = seq;
+      } else {
+        this._zones = withDamper;
+      }
 
       const style = HC.el("style");
       style.textContent = ZONE_CSS;
@@ -84,7 +104,16 @@
 
       const list = HC.el("div", "zones");
       list.style.setProperty("--zcols", String(cfg.columns || 2));
-      this._rows = this._zones.map((z) => {
+      this._rows = [];
+      this._zones.forEach((z) => {
+        if (!z) {
+          /* An empty cell holds the column so the next group starts on a fresh
+             row. It must be inert: no border, no background, not focusable. */
+          const spacer = HC.el("div", "zspacer");
+          spacer.setAttribute("aria-hidden", "true");
+          HC.add(list, spacer);
+          return;
+        }
         const row = HC.el("div", "zone");
 
         const left = HC.el("div");
@@ -121,7 +150,7 @@
 
         HC.add(row, left, nums, bar);
         HC.add(list, row);
-        return { z, row, sub, tempVal, pct, slider };
+        this._rows.push({ z, row, sub, tempVal, pct, slider });
       });
 
       const total = HC.el("div", "ztotal");
