@@ -184,6 +184,99 @@ check("stuffy rotates, bad sticks",
    && !poolAt(7).sticky.some((c) => c.key === "air"),
       `worst ${worst && worst.ppm}ppm vs ok ${th.room_co2} / bad ${th.room_co2_bad}`);
 
+console.log("\nlaundry");
+/* remaining_time is device_class timestamp -- when the cycle ENDS, not the
+   minutes left. Reading it as a number returns null, which is why the tile
+   used to say the bare word "Running" on every single cycle. */
+check("a timestamp is not a duration",
+      HC.num(hass.states[roles.laundry.remaining].state) === null,
+      hass.states[roles.laundry.remaining].state);
+const soon = new Date(Date.now() + 31 * 60000).toISOString();
+check("minsUntil reads the finish time", Math.round(HC.minsUntil(soon)) === 31);
+check("minsUntil rejects a finish time in the past",
+      HC.minsUntil(new Date(Date.now() - 60000).toISOString()) === null);
+check("minsUntil rejects a missing reading", HC.minsUntil("unknown") === null);
+
+const LABELS = roles.laundry.status_labels;
+check("every state the sensor can report has a label", (() => {
+  const opts = hass.states[roles.laundry.status].attributes.options || [];
+  return opts.length > 0 && opts.every((o) => LABELS[o]);
+})(), Object.keys(LABELS).length + " labelled");
+check("every state is classified as exactly one kind", (() => {
+  const opts = hass.states[roles.laundry.status].attributes.options || [];
+  const sets = ["running_states", "paused_states", "finished_states",
+                "booked_states", "error_states"];
+  return opts.every((o) => sets.filter((s) => roles.laundry[s].indexOf(o) >= 0).length <= 1);
+})());
+check("the running set covers the whole wash, not four states of it",
+      ["running", "rinsing", "spinning", "drying", "detecting"]
+        .every((s) => roles.laundry.running_states.indexOf(s) >= 0));
+check("labels are English, not enum keys",
+      LABELS.rinse_hold === "Holding the rinse" && LABELS.power_off === "Off");
+check("an unmapped state still reads as words",
+      HC.stateLabel(null, "steam_softening") === "Steam softening");
+
+const laundryAt = (state, remaining) => {
+  const st = JSON.parse(JSON.stringify(hass.states));
+  st[roles.laundry.status].state = state;
+  st[roles.laundry.remaining].state = remaining || "unknown";
+  /* Push the completion event out of the unload window so these cases test
+     the status alone. */
+  st[roles.laundry.last_event].state = new Date(Date.now() - 9e7).toISOString();
+  const p = HC.contextCandidates({ states: st }, cconf, th, {});
+  return p.sticky.find((c) => c.key === "laundry");
+};
+check("a running wash counts down", (() => {
+  const t = laundryAt("rinsing", soon);
+  return t && t.pill === "RUNNING" && /^31m left$/.test(t.state);
+})(), JSON.stringify(laundryAt("rinsing", soon)));
+check("the line under the pill names the cycle instead of repeating it", (() => {
+  const t = laundryAt("spinning", soon);
+  return t && t.state !== "Running" && /^Spinning · done by /.test(t.ctx);
+})());
+check("no finish time falls back to the cycle name, never 'Running'",
+      laundryAt("rinse_hold").state === "Holding the rinse");
+check("an idle washer gives up its slot", laundryAt("power_off") == null
+   && laundryAt("sleep") == null);
+check("a finished washer asks to be emptied",
+      laundryAt("end").pill === "UNLOAD ME");
+check("a paused washer says so", laundryAt("pause").pill === "PAUSED");
+check("a fault outranks a running cycle",
+      laundryAt("error").rank > laundryAt("rinsing").rank);
+
+console.log("\nenergy attribution");
+/* Five readings and one conservation equation, so the split between sources
+   and sinks is decided by a rule. Whatever the rule, the arithmetic has to
+   close: everything arriving at the house must equal the load. */
+const split = (solar, load, imp, exp, chg, dis) => {
+  const z = (v) => (v > 0 ? v : 0);
+  const S = z(solar), L = z(load);
+  const sh = Math.min(S, L);
+  const sb = Math.min(S - sh, chg);
+  const sg = Math.min(S - sh - sb, z(exp));
+  const bh = Math.min(dis, L - sh);
+  const gh = Math.min(z(imp), L - sh - bh);
+  const gb = Math.min(z(imp) - gh, chg - sb);
+  return { sh, sb, sg, bh, gh, gb };
+};
+const closes = (s) => {
+  const r = split.apply(null, s);
+  const intoHome = r.sh + r.bh + r.gh;
+  return Math.abs(intoHome - Math.max(0, s[1])) < 0.01
+      && Object.values(r).every((v) => v >= -1e-9);
+};
+check("night, battery carrying the house", closes([0, 3.59, 0, 0, 0, 3.59]));
+check("midday, solar covering it with surplus", closes([5.2, 1.1, 0, 4.1, 0, 0]));
+check("solar splitting between house, battery and grid",
+      closes([6.0, 1.0, 0, 2.0, 3.0, 0]));
+check("grid charging the battery overnight", closes([0, 0.4, 3.4, 0, 3.0, 0]));
+check("solar short of the load, grid topping up", closes([1.0, 2.5, 1.5, 0, 0, 0]));
+check("everything at zero", closes([0, 0, 0, 0, 0, 0]));
+check("solar-to-grid only appears when exporting",
+      split(6, 1, 0, 0, 0, 0).sg === 0 && split(6, 1, 0, 4, 0, 0).sg > 0);
+check("grid-to-battery only appears when importing",
+      split(0, 0.4, 0, 0, 3, 0).gb === 0 && split(0, 0.4, 3.4, 0, 3, 0).gb > 0);
+
 console.log("\nslot filling");
 const pool = poolAt(12);
 check("a full row never shows the same subject twice", (() => {
@@ -193,13 +286,36 @@ check("a full row never shows the same subject twice", (() => {
   }
   return true;
 })());
+/* Built by hand rather than taken from the house: how many sticky facts are
+   true right now changes how many slots are left to rotate through, and this
+   is a property of the rotation itself. Odd counts are the interesting ones --
+   the page size does not divide them, so the wrap has to keep advancing. */
 check("rotation reaches every ambient candidate", (() => {
-  const seen = new Set();
-  for (let t = 0; t < pool.ambient.length * 2; t++) {
-    HC.fillSlots(pool, 2, t).forEach((p) => seen.add(p.key));
+  for (const n of [1, 2, 3, 4, 5, 7]) {
+    for (const sticky of [0, 1]) {
+      const p = {
+        sticky: Array.from({ length: sticky }, (_, i) => ({ key: "s" + i })),
+        ambient: Array.from({ length: n }, (_, i) => ({ key: "a" + i }))
+      };
+      const seen = new Set();
+      for (let t = 0; t < n * 4; t++) {
+        HC.fillSlots(p, 2, t).forEach((c) => { if (c.key[0] === "a") seen.add(c.key); });
+      }
+      if (seen.size !== n) return false;
+    }
   }
-  return seen.size === pool.ambient.length;
-})(), `${pool.ambient.length} candidates`);
+  return true;
+})());
+check("a full row never repeats itself, whatever the pool size", (() => {
+  for (const n of [1, 2, 3, 5]) {
+    const p = { sticky: [], ambient: Array.from({ length: n }, (_, i) => ({ key: "a" + i })) };
+    for (let t = 0; t < 12; t++) {
+      const keys = HC.fillSlots(p, 2, t).map((c) => c.key);
+      if (new Set(keys).size !== keys.length) return false;
+    }
+  }
+  return true;
+})());
 check("sticky facts take their slots first", (() => {
   const p = poolAt(3);                       // bin night
   return HC.fillSlots(p, 2, 99)[0].key === "bins";

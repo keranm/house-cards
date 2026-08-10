@@ -29,18 +29,82 @@
   .en-tot .v { font-family: var(--hc-mono); font-weight: 600; color: var(--hc-ink-2); }
   .node-label { font-size: 13px; fill: var(--hc-muted); }
   .node-value { font-family: var(--hc-mono); font-size: 12px; font-weight: 600; fill: var(--hc-ink); }
+  /* An idle edge stays on screen so the diagram keeps its shape as flows come
+     and go, but it thins out and fades rather than sitting there at full
+     weight in grey. Six equal grey lines is the spider web this layout was
+     rebuilt to avoid. */
+  .flow { transition: stroke .4s ease, opacity .4s ease; }
+  .flow.off { stroke-width: 1.5; opacity: .45; }
   @media (max-width: 900px) { .en-grid { grid-template-columns: minmax(0,1fr); } }
   `;
 
-  /* Node geometry. Solar top, Battery bottom, Grid left, Home right -- power
-     reads left-to-right and top-to-bottom, which is how the mock reads. */
+  /* ---- geometry -------------------------------------------------------- *
+   * Solar top, Battery bottom, Grid left, Home right, on a symmetric cross.
+   *
+   * The first version drew each edge as a quadratic straight from one rim to
+   * another with a perpendicular bulge. Four diagonal arcs across a square is
+   * what made it read as sloppy: nothing lined up with anything, the two
+   * horizontal nodes sat off the vertical midpoint, and there was no room for
+   * the two edges that were missing entirely (solar to grid, grid to battery).
+   *
+   * Now every edge is a stem, one rounded right angle, and a straight run into
+   * the far rim -- the routing a wiring diagram uses. The stems and the runs
+   * sit in lanes either side of the axis so six edges coexist with exactly one
+   * crossing, in the middle, where the vertical solar-to-battery line passes
+   * the horizontal grid-to-home one.
+   */
+  const CX = 200, CY = 151;
   const NODES = {
-    solar:   { x: 200, y: 42,  label: "Solar",   color: "var(--hc-amber-gold)" },
-    grid:    { x: 68,  y: 150, label: "Grid",    color: "var(--hc-grey)" },
-    home:    { x: 332, y: 150, label: "Home",    color: "var(--hc-green)" },
-    battery: { x: 200, y: 210, label: "Battery", color: "var(--hc-green)" }
+    solar:   { x: CX,  y: 52,  label: "Solar",   color: "var(--hc-amber-gold)", above: true },
+    grid:    { x: 54,  y: CY,  label: "Grid",    color: "var(--hc-grey)" },
+    home:    { x: 346, y: CY,  label: "Home",    color: "var(--hc-green)" },
+    battery: { x: CX,  y: 250, label: "Battery", color: "var(--hc-green)" }
   };
-  const R = 30;
+  const R = 32;
+  const LANE = 16;    // how far a horizontal run sits off the centre line
+  const STEM = 11;    // how far a vertical stem sits off the centre line
+  const BEND = 40;    // corner radius of the single right angle in each edge
+
+  /* Where a horizontal line at height `y` meets a circle, and where a vertical
+     line at `x` meets one. Edges terminate on the rim rather than at `x - R`,
+     which is only correct for a line through the centre -- the off-axis lanes
+     would otherwise stop short of the circle and leave a visible gap. */
+  const rimX = (n, y, side) => n.x + side * Math.sqrt(Math.max(0, R * R - (y - n.y) * (y - n.y)));
+  const rimY = (n, x, side) => n.y + side * Math.sqrt(Math.max(0, R * R - (x - n.x) * (x - n.x)));
+
+  const f = (v) => v.toFixed(1);
+
+  /* An edge between a vertical node (solar, battery) and a horizontal one
+     (grid, home): a stem off the vertical node, one rounded corner, then a
+     straight run into the horizontal node's rim.
+       sx     which side of the vertical axis the stem sits on
+       ly     the height of the horizontal run
+       down   true if the stem leaves the vertical node downwards
+       out    true if power flows from the vertical node to the horizontal one
+
+     `out` exists so every path is *authored* in the direction power actually
+     travels. The old diagram animated one path backwards to mean export, which
+     is why import and export had to share a single line. */
+  const elbow = (vert, horiz, sx, ly, down, out) => {
+    const x = CX + sx * STEM;
+    const y0 = rimY(vert, x, down ? 1 : -1);          // on the vertical rim
+    const side = horiz.x > CX ? 1 : -1;
+    const cy = ly - (down ? 1 : -1) * BEND;           // where the stem ends
+    const cx = x + side * BEND;                       // where the corner ends
+    const hx = rimX(horiz, ly, -side);                // on the horizontal rim
+    return out
+      ? `M${f(x)},${f(y0)} V${f(cy)} Q${f(x)},${f(ly)} ${f(cx)},${f(ly)} H${f(hx)}`
+      : `M${f(hx)},${f(ly)} H${f(cx)} Q${f(x)},${f(ly)} ${f(x)},${f(cy)} V${f(y0)}`;
+  };
+
+  const EDGES = {
+    solar_grid:    () => elbow(NODES.solar, NODES.grid, -1, CY - LANE, true, true),
+    solar_home:    () => elbow(NODES.solar, NODES.home, 1, CY - LANE, true, true),
+    solar_battery: () => `M${CX},${f(NODES.solar.y + R)} V${f(NODES.battery.y - R)}`,
+    grid_home:     () => `M${f(NODES.grid.x + R)},${CY} H${f(NODES.home.x - R)}`,
+    grid_battery:  () => elbow(NODES.battery, NODES.grid, -1, CY + LANE, false, false),
+    battery_home:  () => elbow(NODES.battery, NODES.home, 1, CY + LANE, false, true)
+  };
 
   /* Below this the reading is noise, not a flow. */
   const DEADBAND = 0.02;   // kW
@@ -63,26 +127,23 @@
       HC.add(head, HC.el("span", "title", cfg.title || "Energy right now"), live);
 
       /* ---- flow diagram ----
-         Four edges, not six. An earlier version drew grid->battery and
-         home->grid as their own paths; they retrace geometry already on screen
-         and the idle greys crossed into a spider web. Export reuses the grid
-         edge running backwards, which is what export actually is. */
-      const svg = HC.svg("svg", { viewBox: "0 0 400 272", width: "100%",
+         All six edges now exist. Solar-to-grid and grid-to-battery were
+         missing, so exporting looked identical to importing and a battery
+         charging off the grid at 3am drew nothing at all. */
+      const svg = HC.svg("svg", { viewBox: "0 0 400 306", width: "100%",
                                   preserveAspectRatio: "xMidYMid meet",
                                   role: "img", "aria-label": "Power flow" });
-      svg.style.maxHeight = "260px";
+      /* Capped on width rather than height, and centred. Capping the height of
+         a taller-than-wide viewBox leaves the diagram as a small object adrift
+         in a wide column. */
+      svg.style.maxWidth = "460px";
       svg.style.display = "block";
+      svg.style.margin = "0 auto";
       this._paths = {};
       /* Drawn before the nodes so circles sit on top of the lines. */
-      for (const [key, [a, b]] of Object.entries({
-        solar_home:    ["solar", "home"],
-        solar_battery: ["solar", "battery"],
-        grid_home:     ["grid", "home"],
-        battery_home:  ["battery", "home"]
-      })) {
+      for (const key in EDGES) {
         const p = HC.svg("path", { class: "flow off", fill: "none", "stroke-width": 3,
-                                   "stroke-linecap": "round" });
-        p.setAttribute("d", this._edge(NODES[a], NODES[b]));
+                                   "stroke-linecap": "round", d: EDGES[key]() });
         this._paths[key] = p;
         HC.add(svg, p);
       }
@@ -98,8 +159,11 @@
         const value = HC.svg("text", {
           x: n.x, y: n.y + 4, "text-anchor": "middle", class: "node-value"
         });
+        /* Solar's caption goes above it. Below is where its two stems leave
+           the rim, and the word sat straight on top of them. */
         const label = HC.svg("text", {
-          x: n.x, y: n.y + R + 17, "text-anchor": "middle", class: "node-label"
+          x: n.x, y: n.above ? n.y - R - 10 : n.y + R + 17,
+          "text-anchor": "middle", class: "node-label"
         });
         label.textContent = n.label;
         HC.add(g, circle, value, label);
@@ -159,27 +223,19 @@
       return root;
     }
 
-    /* A gentle curve between two node rims rather than a straight line: four
-       straight spokes meeting at a circle looks like a schematic, and this is
-       meant to look like flow. */
-    _edge(a, b) {
-      const dx = b.x - a.x, dy = b.y - a.y;
-      const len = Math.hypot(dx, dy) || 1;
-      const ux = dx / len, uy = dy / len;
-      const x1 = a.x + ux * R, y1 = a.y + uy * R;
-      const x2 = b.x - ux * R, y2 = b.y - uy * R;
-      const mx = (x1 + x2) / 2 - uy * 18, my = (y1 + y2) / 2 + ux * 18;
-      return `M${x1.toFixed(1)},${y1.toFixed(1)} Q${mx.toFixed(1)},${my.toFixed(1)} ${x2.toFixed(1)},${y2.toFixed(1)}`;
-    }
-
-    _setFlow(key, active, color, reverse) {
+    _setFlow(key, kw, color) {
       const p = this._paths[key];
       if (!p) return;
+      const active = kw != null && kw > DEADBAND;
       p.setAttribute("class", "flow " + (active ? "on" : "off"));
       p.style.stroke = active ? color : "";
-      /* Animating the offset the other way is what makes the arrow of time
-         point where the power is going. */
-      p.style.animationDirection = reverse ? "reverse" : "normal";
+      /* The dash crawls from the start of the path towards its end, and every
+         path is authored in the direction power travels, so this is the arrow
+         of time with nothing to configure. */
+      const title = p.querySelector("title") || HC.add(p, HC.svg("title")).lastChild;
+      HC.setText(title, active
+        ? `${key.replace("_", " to ")}: ${HC.powerText(kw)}`
+        : `${key.replace("_", " to ")}: nothing`);
     }
 
     update() {
@@ -195,7 +251,6 @@
       const exporting = exp != null && exp > DEADBAND;
       const charging = flow.dir === "charge";
       const discharging = flow.dir === "discharge";
-      const solarOn = solar != null && solar > DEADBAND;
 
       HC.setText(this._liveText, importing ? "IMPORTING"
         : exporting ? "EXPORTING" : "SELF-SUFFICIENT");
@@ -214,16 +269,39 @@
         this._nodes.battery.value.textContent = soc == null ? "--" : Math.round(soc) + "%";
       }
 
+      /* ---- who is feeding what ----
+         Five readings, one conservation equation, six possible edges: the
+         split is genuinely ambiguous and has to be decided by a rule rather
+         than measured. The rule is the conventional one, and the one the
+         household would assume: solar covers the house first, then the
+         battery, and only the surplus goes to the grid. Whatever the house
+         still wants after solar and battery is what the grid is importing.
+
+         Drawing the raw sensors instead is what produced the old picture --
+         solar at 62 W drew a full-weight line to a house pulling 3.5 kW, as
+         though the roof were carrying it. */
+      const at_least_0 = (v) => (v != null && v > 0 ? v : 0);
+      const S = at_least_0(solar), L = at_least_0(load);
+      const chg = charging ? at_least_0(flow.kw) : 0;
+      const dis = discharging ? at_least_0(flow.kw) : 0;
+
+      const solarHome = Math.min(S, L);
+      const solarBattery = Math.min(S - solarHome, chg);
+      const solarGrid = Math.min(S - solarHome - solarBattery, at_least_0(exp));
+      const batteryHome = Math.min(dis, L - solarHome);
+      const gridHome = Math.min(at_least_0(imp), L - solarHome - batteryHome);
+      const gridBattery = Math.min(at_least_0(imp) - gridHome, chg - solarBattery);
+
       const GREEN = "var(--hc-green)";
       const RED = "var(--hc-red)";
       const GOLD = "var(--hc-amber-gold)";
 
-      this._setFlow("solar_home", solarOn, GOLD, false);
-      this._setFlow("solar_battery", solarOn && charging, GOLD, false);
-      /* One grid edge: import runs towards the house, export runs away from
-         it, which is the same line animated the other way. */
-      this._setFlow("grid_home", importing || exporting, importing ? RED : GREEN, exporting);
-      this._setFlow("battery_home", discharging, GREEN, false);
+      this._setFlow("solar_home", solarHome, GOLD);
+      this._setFlow("solar_battery", solarBattery, GOLD);
+      this._setFlow("solar_grid", solarGrid, GREEN);
+      this._setFlow("battery_home", batteryHome, GREEN);
+      this._setFlow("grid_home", gridHome, RED);
+      this._setFlow("grid_battery", gridBattery, RED);
 
       /* ---- arrays ---- */
       const vals = this._arows.map((r) => HC.read(this.hass, r.a.power).value);

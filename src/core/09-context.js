@@ -62,6 +62,29 @@
 
   const weekday = (d) => d.toLocaleDateString("en-AU", { weekday: "long" });
 
+  /* Minutes until an ISO timestamp. Several appliance integrations publish
+     "remaining" as `device_class: timestamp` -- the moment the cycle ends, not
+     a duration -- and reading one with HC.num returns null, which looks like a
+     missing sensor rather than a misread one. */
+  HC.minsUntil = (iso, now) => {
+    if (!iso) return null;
+    const t = new Date(iso);
+    if (isNaN(t)) return null;
+    const mins = (t.getTime() - (now || new Date()).getTime()) / 60000;
+    return mins > 0 ? mins : null;
+  };
+
+  /* A raw state string to something you would say out loud. The map lives in
+     the role map, not here: "rinse_hold" is this washer's word, and the next
+     appliance will have its own. Absent a map, title-case the state -- which
+     is wrong less often than showing `steam_softening` to the family. */
+  HC.stateLabel = (labels, state) => {
+    if (state == null) return "--";
+    if (labels && labels[state]) return labels[state];
+    const s = String(state).replace(/_/g, " ");
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  };
+
   /* ---- bins ---------------------------------------------------------- *
    * The bin card used to sit amber for the whole day of collection, which is
    * how you end up being told to put the bins out at seven in the evening,
@@ -132,28 +155,72 @@
       const status = HC.read(hass, cfg.status);
       if (status.absent || !status.ok) return null;
 
-      if ((cfg.running_states || []).indexOf(status.state) >= 0) {
-        const mins = HC.read(hass, cfg.remaining).value;
+      const label = HC.stateLabel(cfg.status_labels, status.state);
+      const has = (list, s) => (list || []).indexOf(s) >= 0;
+
+      if (has(cfg.error_states, status.state)) {
+        return { rank: 145, label: "Laundry", pill: "NEEDS A LOOK", tone: "bad",
+                 state: label, ctx: "The washer has stopped on a fault",
+                 entity: cfg.status };
+      }
+
+      if (has(cfg.running_states, status.state)) {
+        /* `remaining_time` is device_class timestamp -- it is when the cycle
+           ENDS, not how long is left. Running it through HC.num returns null
+           for the ISO string, which is why this branch used to fall through to
+           the bare word "Running" every single time. */
+        const mins = HC.minsUntil(HC.read(hass, cfg.remaining).state, ctx.now);
         return {
           rank: 120, label: "Laundry", pill: "RUNNING", tone: "good",
-          state: mins != null ? HC.duration(mins) + " left" : "Running",
-          ctx: "Cycle in progress", entity: cfg.status
+          state: mins != null ? HC.duration(mins) + " left" : label,
+          /* The pill already says RUNNING, so the line underneath earns its
+             place by naming the part of the cycle rather than repeating it. */
+          ctx: mins != null
+            ? `${label} · done by ${HC.clock(HC.read(hass, cfg.remaining).state)}`
+            : "Cycle in progress",
+          entity: cfg.status
         };
       }
 
-      /* No door sensor exists, so "unload me" is a guess from the finish time.
-         It is labelled as one by expiring rather than nagging forever. */
+      if (has(cfg.paused_states, status.state)) {
+        return { rank: 125, label: "Laundry", pill: "PAUSED", tone: "warn",
+                 amber: true, state: label,
+                 ctx: "Mid-cycle · start it again to finish",
+                 entity: cfg.status };
+      }
+
+      /* A delayed start is worth knowing about so nobody opens the door on it,
+         but it is not urgent and it does not get to be amber. */
+      if (has(cfg.booked_states, status.state)) {
+        const end = HC.read(hass, cfg.delayed_end);
+        if (!end.ok) return null;
+        return { rank: 60, label: "Laundry", pill: "BOOKED", tone: "idle",
+                 state: label, ctx: `Set to finish ${HC.clock(end.state)}`,
+                 entity: cfg.status };
+      }
+
+      /* Finished. The machine says so itself while it is still awake; once it
+         powers down the only record is the completion event, so both are
+         accepted. There is no door sensor, so "unload me" is a guess either
+         way -- it is labelled as one by expiring rather than nagging forever. */
       const ev = HC.read(hass, cfg.last_event);
       const at_ = ev.ok ? new Date(ev.state) : null;
-      if (!at_ || isNaN(at_)) return null;
-      const hours = (ctx.now.getTime() - at_.getTime()) / 3600000;
-      if (hours >= Number(config.unload_window_hours || 3)) return null;
+      const recent = at_ && !isNaN(at_)
+        && (ctx.now.getTime() - at_.getTime()) / 3600000
+             < Number(config.unload_window_hours || 3);
 
-      return {
-        rank: 140, label: "Laundry", pill: "UNLOAD ME", tone: "warn",
-        amber: true, state: "Finished",
-        ctx: `Cycle finished ${HC.ago(at_)}`, entity: cfg.status
-      };
+      if (has(cfg.finished_states, status.state) || recent) {
+        return {
+          rank: 140, label: "Laundry", pill: "UNLOAD ME", tone: "warn",
+          amber: true, state: "Finished",
+          ctx: recent ? `Cycle finished ${HC.ago(at_)}` : "Waiting to be emptied",
+          entity: cfg.status
+        };
+      }
+
+      /* Off, asleep, or anything this washer's vocabulary does not cover.
+         Nothing is happening, so the slot goes to something that is. */
+      return null;
     },
 
     /* Air only takes a permanent slot once it is past the bad line the Climate

@@ -47,7 +47,7 @@ strobes.
 | `hc-attention` | Doors and batteries, plus what the hour makes worth knowing |
 | `hc-step-leaderboard` | Ranked steps by day/week/month, with generated commentary |
 | `hc-room-grid` | Every room's temperature, humidity, trend; click to expand |
-| `hc-energy-now` | Live flow between solar, grid, battery and the house |
+| `hc-energy-now` | Live flow between solar, grid, battery and the house, all six edges |
 | `hc-whats-on` | Which lights are on, tap to toggle, all-off |
 | `hc-batteries` | Device batteries worst-first, healthy ones folded away |
 
