@@ -150,9 +150,19 @@
         const dur = HC.read(this.hass, t.last_duration).value;
         const vol = HC.read(this.hass, t.last_volume).value;
 
+        /* The duration and the date come from two different helpers, and they
+           disagree here: several taps hold a last_duration from a real run
+           while last_watered is still the "never" sentinel, because the
+           run-finished automation stamps them separately. Saying "no run
+           logged yet" beside a 1m last run is the card calling itself a liar,
+           so an undated run is reported as exactly that. */
+        const monthMins = HC.read(this.hass, t.month_minutes).value;
+        const ranSometime = (dur != null && dur > 0) || (monthMins != null && monthMins > 0);
+
         HC.setText(r.sub, !sw.ok ? "Valve not reporting"
           : on ? "Running now"
           : last ? `Last watered ${HC.ago(last)}`
+          : ranSometime ? "Has run — no date recorded"
           : "No run logged yet");
 
         /* Litres only when there are any -- see the note at the top. */
@@ -162,10 +172,10 @@
           return litres ? `${m} · ${HC.dec(litres, 1)} L` : m;
         };
 
-        HC.setText(r.vLast, last || dur != null ? withVol(dur, vol) : "Never");
+        HC.setText(r.vLast, dur != null && dur > 0 ? withVol(dur, vol) : "Never");
         HC.setText(r.vWeek, withVol(HC.read(this.hass, t.week_minutes).value,
                                     HC.read(this.hass, t.week_volume).value));
-        HC.setText(r.vMonth, withVol(HC.read(this.hass, t.month_minutes).value,
+        HC.setText(r.vMonth, withVol(monthMins,
                                      HC.read(this.hass, t.month_volume).value));
 
         const batt = HC.read(this.hass, t.battery).value;
