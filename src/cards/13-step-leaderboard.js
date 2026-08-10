@@ -60,7 +60,17 @@
   .talk .lbl { font-family: var(--hc-mono); font-size: 11px; letter-spacing: .14em;
                color: var(--hc-amber-deep); flex: none; }
   .talk .txt { font-size: 14px; color: var(--hc-amber-body); }
-  @media (max-width: 560px) { .lb-row { grid-template-columns: 28px 1fr 96px; gap: 10px; } }
+  @media (max-width: 700px) {
+    .lb-head { flex-direction: column; align-items: flex-start; gap: 10px; }
+    .lb-row { grid-template-columns: 30px 1fr 92px; gap: 10px; }
+    .lb-total { font-size: 18px; }
+    .talk { flex-direction: column; gap: 4px; }
+  }
+  @media (max-width: 400px) {
+    .lb-row { grid-template-columns: 26px 1fr 76px; gap: 8px; padding: 10px 12px; }
+    .lb-total { font-size: 16px; }
+    .who-name { font-size: 14px; }
+  }
   `;
 
   const RANKS = ["1st", "2nd", "3rd", "4th", "5th", "6th"];

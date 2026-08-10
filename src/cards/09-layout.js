@@ -43,11 +43,13 @@
     --ha-card-background: var(--hc-surface);
   }
   .lrow { display: grid; gap: var(--gap, 16px); align-items: start; }
+  .lrow > * { min-width: 0; }
   .lcol { display: flex; flex-direction: column; gap: var(--gap, 16px); }
   @media (max-width: 1000px) {
     .lrow { grid-template-columns: 1fr !important; }
     .page { padding: 16px; }
   }
+  @media (max-width: 600px) { .page { padding: 12px 12px 40px; } }
   `;
 
   class Layout extends HC.Card {

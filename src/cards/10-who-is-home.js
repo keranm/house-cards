@@ -8,7 +8,15 @@
    */
 
   const WHO_CSS = `
-  .people { display: grid; grid-template-columns: repeat(var(--cols, 4), 1fr); gap: 12px; }
+  /* Four across was fixed, with no breakpoint -- on a phone that alone made
+     the whole page scroll sideways, because a flex column is as wide as its
+     widest child. */
+  .people {
+    display: grid; gap: 12px;
+    grid-template-columns: repeat(var(--cols, 4), minmax(0, 1fr));
+  }
+  @media (max-width: 820px) { .people { grid-template-columns: repeat(2, minmax(0,1fr)); } }
+  @media (max-width: 380px) { .people { grid-template-columns: 1fr; } }
   .person {
     border: 1px solid var(--hc-border); border-radius: var(--hc-r-tile);
     padding: 14px 16px; display: flex; flex-direction: column; gap: 10px;

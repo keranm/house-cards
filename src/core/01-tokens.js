@@ -123,6 +123,14 @@
 
   * { box-sizing: border-box; }
 
+  /* A grid or flex child defaults to min-width:auto, which refuses to shrink
+     below its content and pushes the whole page wider than the viewport. On a
+     phone that shows up as horizontal scroll and cards running off the right
+     edge. Every card in this kit lives in a grid, so the floor is set once
+     here rather than per card. */
+  .card, .row > *, .col > * { min-width: 0; }
+  img, svg { max-width: 100%; }
+
   /* ---- card shell ------------------------------------------------- */
   .card {
     background: var(--hc-surface);

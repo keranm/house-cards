@@ -12,7 +12,7 @@
    */
 
   const EN_CSS = `
-  .en-grid { display: grid; grid-template-columns: 1fr 300px; gap: 20px; align-items: start; }
+  .en-grid { display: grid; grid-template-columns: minmax(0,1fr) 300px; gap: 20px; align-items: start; }
   .en-live { display: flex; align-items: center; gap: 8px; }
   .en-live span { font-family: var(--hc-mono); font-size: 11px; letter-spacing: .12em; }
   .arrays { display: flex; flex-direction: column; gap: 10px; }
@@ -29,7 +29,7 @@
   .en-tot .v { font-family: var(--hc-mono); font-weight: 600; color: var(--hc-ink-2); }
   .node-label { font-size: 13px; fill: var(--hc-muted); }
   .node-value { font-family: var(--hc-mono); font-size: 12px; font-weight: 600; fill: var(--hc-ink); }
-  @media (max-width: 900px) { .en-grid { grid-template-columns: 1fr; } }
+  @media (max-width: 900px) { .en-grid { grid-template-columns: minmax(0,1fr); } }
   `;
 
   /* Node geometry. Solar top, Battery bottom, Grid left, Home right -- power
