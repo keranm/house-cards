@@ -32,10 +32,16 @@
   .zpct { font-family: var(--hc-mono); font-size: 11px; letter-spacing: .08em;
           color: var(--hc-faint); }
   .zbar { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; }
+  /* The track is painted with a gradient rather than left plain: a lone thumb
+     on an empty rail reads as a control, not as a reading, and the point of
+     this row is to show how open the damper IS. --fill is set per row. */
   .zbar input {
     flex: 1; -webkit-appearance: none; appearance: none; height: 8px;
-    border-radius: var(--hc-r-bar); background: var(--hc-rule); outline: none;
+    border-radius: var(--hc-r-bar); outline: none;
     cursor: pointer; margin: 0;
+    background: linear-gradient(to right,
+      var(--zone-accent, var(--hc-green)) 0 var(--fill, 0%),
+      var(--hc-rule) var(--fill, 0%) 100%);
   }
   .zbar input::-webkit-slider-thumb {
     -webkit-appearance: none; width: 18px; height: 18px; border-radius: 50%;
@@ -102,7 +108,7 @@
         });
         slider.addEventListener("input", () => {
           HC.setText(pct, slider.value + "% OPEN");
-          this._dragging = true;
+          slider.style.setProperty("--fill", slider.value + "%");
         });
         HC.add(bar, slider);
 
@@ -140,8 +146,15 @@
           if (pct >= SHUT) open++;
           /* Do not fight the user's thumb: only write the slider back from
              state when it is not being dragged. */
-          if (document.activeElement !== r.slider) r.slider.value = String(pct);
+          if (document.activeElement !== r.slider) {
+            r.slider.value = String(pct);
+            r.slider.style.setProperty("--fill", pct + "%");
+          }
           HC.setText(r.pct, Math.round(pct) + "% OPEN");
+          /* A shut damper's fill is grey, not green: green on a zero-width bar
+             is invisible anyway, and grey matches the dimmed row. */
+          r.slider.style.setProperty("--zone-accent",
+            pct < SHUT ? "var(--hc-grey)" : "var(--hc-green)");
         } else {
           HC.setText(r.pct, "NO DATA");
         }
