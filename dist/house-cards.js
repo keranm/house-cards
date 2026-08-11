@@ -984,6 +984,49 @@
   };
   HC.condLabel = (c) => COND_LABEL[c] || (c ? String(c).replace(/-/g, " ") : "--");
 
+  /* ---- weather bands -------------------------------------------------- *
+   * The numbers at which rain, wind and UV stop being trivia and start being
+   * something you would change your day over. They live here rather than in
+   * the garden card that first needed them, so the forecast on the Garden page
+   * and the one in the attention row cannot call the same afternoon breezy and
+   * calm -- the same argument as HC.thresholds, applied to the sky.
+   *
+   * These are domestic numbers, not meteorological ones: spray drifts above
+   * ~20 km/h, things need staking above ~40, and 2mm is the point where rain
+   * has actually watered something.
+   */
+  HC.WEATHER = {
+    rain_useful: 2,      // mm -- below this you are still the irrigation
+    wind_breezy: 20,     // km/h
+    wind_strong: 40,
+    uv_mid: 3,
+    uv_high: 8
+  };
+
+  /* One forecast entry to the three facts worth a glance, each already carrying
+     its tone so every card colours them identically. */
+  HC.weatherFacts = (f) => {
+    if (!f) return [];
+    const W = HC.WEATHER;
+    const mm = HC.num(f.precipitation);
+    const wind = HC.num(f.wind_speed);
+    const uv = HC.num(f.uv_index);
+
+    return [
+      { key: "rain", icon: "mdi:weather-rainy",
+        value: mm == null ? "--" : (mm < 0.1 ? "none" : HC.dec(mm, 1) + " mm"),
+        tone: mm == null ? "quiet" : mm >= W.rain_useful ? "wet" : mm >= 0.1 ? "" : "quiet" },
+      { key: "wind", icon: "mdi:weather-windy",
+        value: wind == null ? "--" : Math.round(wind) + " km/h",
+        tone: wind == null ? "quiet"
+            : wind >= W.wind_strong ? "bad" : wind >= W.wind_breezy ? "warn" : "quiet" },
+      { key: "uv", icon: "mdi:white-balance-sunny",
+        value: uv == null ? "--" : "UV " + Math.round(uv),
+        tone: uv == null ? "quiet"
+            : uv >= W.uv_high ? "bad" : uv >= W.uv_mid ? "warn" : "quiet" }
+    ];
+  };
+
   /* Whole days from `now`, built from calendar fields rather than by adding
      86,400,000ms -- Adelaide has daylight saving, and the arithmetic version
      lands on the wrong weekday twice a year. */
@@ -1314,14 +1357,10 @@
       const hi = HC.num(f.temperature);
       const lo = HC.num(f.templow);
       const mm = HC.num(f.precipitation);
-      /* Under a millimetre is not weather anyone plans around, but it is not
-         nothing either -- calling 0.9mm "dry" is the sort of small lie that
-         costs you the washing. */
-      const bits = [HC.condLabel(f.condition)];
-      bits.push(mm == null || mm < 0.2 ? "dry"
-              : mm < 1 ? "a spot of rain"
-              : `${HC.dec(mm, 1)} mm of rain`);
-
+      /* Temperatures answer "what do I wear"; rain, wind and UV answer the
+         questions that actually change a day -- whether the washing goes out,
+         whether the umbrella survives, whether anyone burns. The strip carries
+         all three in the same colours the Garden page uses. */
       return {
         weights: { morning: 1, midday: .5, afternoon: .5,
                    evening: .9, late: .6, night: .5 },
@@ -1329,7 +1368,10 @@
         pill: late ? "TOMORROW" : "TODAY", tone: "idle",
         state: hi == null ? "--"
              : Math.round(hi) + "°" + (lo == null ? "" : " / " + Math.round(lo) + "°"),
-        ctx: bits.join(" · "),
+        aside: HC.condLabel(f.condition),
+        metrics: HC.weatherFacts(f),
+        ctx: HC.condLabel(f.condition)
+           + (mm == null || mm < 0.2 ? " · dry" : ` · ${HC.dec(mm, 1)} mm of rain`),
         entity: ctx.weatherEntity
       };
     },
@@ -2094,6 +2136,23 @@
   .att.amber .stage.now ha-icon, .att.amber .stage.done ha-icon { color: var(--hc-amber); }
   .att.amber .stage.now .nm { color: var(--hc-amber-ink); }
 
+  /* ---- fact strip ---- *
+   * Three readings on one line, each coloured by its own band, in place of the
+   * caption. Same shape as the cycle strip and the same reason: it says more
+   * than a sentence in the same height, so the row does not grow.
+   */
+  .att .facts { display: flex; gap: 11px; margin-top: 9px; flex-wrap: nowrap;
+                overflow: hidden; }
+  .att .fact { display: flex; align-items: center; gap: 4px; min-width: 0; }
+  .att .fact ha-icon { --mdc-icon-size: 15px; width: 15px; height: 15px;
+                       flex: none; color: var(--hc-ink-2); }
+  .att .fact .v { font-family: var(--hc-mono); font-size: 12px; font-weight: 600;
+                  color: var(--hc-ink-2); white-space: nowrap; }
+  .att .fact.quiet ha-icon, .att .fact.quiet .v { color: var(--hc-faint); font-weight: 400; }
+  .att .fact.wet ha-icon,   .att .fact.wet .v   { color: var(--hc-blue); }
+  .att .fact.warn ha-icon,  .att .fact.warn .v  { color: var(--hc-amber-deep); }
+  .att .fact.bad ha-icon,   .att .fact.bad .v   { color: var(--hc-red-ink); }
+
   .att .prog { position: absolute; left: 0; right: 0; bottom: 0; height: 3px;
                background: var(--hc-rule); }
   .att .prog i { display: block; height: 100%; width: 0;
@@ -2156,18 +2215,19 @@
         HC.add(staterow, state, aside);
         const ctx = HC.el("div", "ctx");
         const stages = HC.el("div", "stages");
+        const facts = HC.el("div", "facts");
         const prog = HC.el("div", "prog");
         const fill = HC.el("i");
         HC.add(prog, fill);
-        HC.add(t, head, staterow, ctx, stages, prog);
+        HC.add(t, head, staterow, ctx, stages, facts, prog);
         /* Stagger the row 40ms apart, as the design specifies. */
         if (cfg.animate !== false) {
           t.classList.add("in");
           t.style.animationDelay = (i * 40) + "ms";
         }
         HC.add(grid, t);
-        return { slot: key, t, label, pill, state, aside, ctx, stages, prog, fill,
-                 subject: null, stageKey: null };
+        return { slot: key, t, label, pill, state, aside, ctx, stages, facts,
+                 prog, fill, subject: null, stageKey: null, factKey: null };
       });
 
       this._subscribe();
@@ -2250,9 +2310,10 @@
       HC.setText(tile.state, spec.state);
       HC.setText(tile.aside, spec.aside || "");
       this._setStages(tile, spec);
-      /* The strip already names the stage, so the sentence would only repeat
-         it. Where there is no strip the sentence is all there is. */
-      tile.ctx.style.display = spec.stages ? "none" : "";
+      this._setFacts(tile, spec);
+      /* A strip says more than the sentence would, in the same height. Where
+         there is no strip the sentence is all there is. */
+      tile.ctx.style.display = (spec.stages || spec.metrics) ? "none" : "";
       HC.setText(tile.ctx, spec.ctx);
 
       const tone = spec.tone === "bad" ? "bad"
@@ -2329,6 +2390,34 @@
         const done = spec.stage != null && i < spec.stage;
         const now = spec.stage != null && i === spec.stage;
         cell.className = "stage" + (now ? " now" : done ? " done" : "");
+      });
+    }
+
+    /* Three readings and their bands. Rebuilt only when the set of readings
+       changes, which is when a different candidate takes the slot. */
+    _setFacts(tile, spec) {
+      const facts = spec.metrics || null;
+      const key = facts ? facts.map((f) => f.key).join("|") : "";
+      if (tile.factKey !== key) {
+        tile.factKey = key;
+        tile.facts.textContent = "";
+        tile.factNodes = (facts || []).map((f) => {
+          const cell = HC.el("div", "fact");
+          const icon = document.createElement("ha-icon");
+          icon.setAttribute("icon", f.icon || "mdi:circle-small");
+          const v = HC.el("span", "v");
+          HC.add(cell, icon, v);
+          HC.add(tile.facts, cell);
+          return { cell, v };
+        });
+      }
+      tile.facts.style.display = facts ? "" : "none";
+      if (!facts) return;
+      facts.forEach((f, i) => {
+        const n = (tile.factNodes || [])[i];
+        if (!n) return;
+        n.cell.className = "fact" + (f.tone ? " " + f.tone : "");
+        HC.setText(n.v, f.value);
       });
     }
 
@@ -4160,11 +4249,12 @@
     exceptional: "mdi:alert-circle-outline"
   };
 
-  /* Bands. Wind is in km/h and these are gardening numbers, not storm numbers:
-     spraying drifts above ~20, and staking matters above ~40. */
-  const WIND_BREEZY = 20;
-  const WIND_STRONG = 40;
-  const RAIN_USEFUL = 2;
+  /* Bands live in HC.WEATHER, shared with the attention row's weather tile.
+     They were local to this card first; two cards colouring the same afternoon
+     breezy and calm is the sky version of the battery-threshold bug. */
+  const WIND_BREEZY = HC.WEATHER.wind_breezy;
+  const WIND_STRONG = HC.WEATHER.wind_strong;
+  const RAIN_USEFUL = HC.WEATHER.rain_useful;
 
   class GardenForecast extends HC.Card {
     constructor() {
@@ -4284,7 +4374,7 @@
         HC.add(uvEl,
           HC.el("span", "lbl", "UV"),
           HC.el("span", uv == null ? "quiet"
-                : uv >= 8 ? "uv-hi" : uv >= 3 ? "uv-mid" : "uv-ok",
+                : uv >= HC.WEATHER.uv_high ? "uv-hi" : uv >= HC.WEATHER.uv_mid ? "uv-mid" : "uv-ok",
                 uv == null ? "--" : HC.dec(uv, 1)));
         HC.add(meta, uvEl);
 
@@ -4320,7 +4410,7 @@
       else if (w >= WIND_BREEZY) bits.push(`breeziest ${name(windiest)} at ${Math.round(w)} km/h`);
 
       const u = HC.num(maxUv.uv_index) || 0;
-      if (u >= 8) bits.push(`UV peaks at ${HC.dec(u, 1)} ${name(maxUv)} — shade anything just planted`);
+      if (u >= HC.WEATHER.uv_high) bits.push(`UV peaks at ${HC.dec(u, 1)} ${name(maxUv)} — shade anything just planted`);
 
       /* Each clause is built independently, so each has to start as a
          sentence -- joining them raw produced "...Saturday. breeziest

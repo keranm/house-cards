@@ -54,6 +54,49 @@
   };
   HC.condLabel = (c) => COND_LABEL[c] || (c ? String(c).replace(/-/g, " ") : "--");
 
+  /* ---- weather bands -------------------------------------------------- *
+   * The numbers at which rain, wind and UV stop being trivia and start being
+   * something you would change your day over. They live here rather than in
+   * the garden card that first needed them, so the forecast on the Garden page
+   * and the one in the attention row cannot call the same afternoon breezy and
+   * calm -- the same argument as HC.thresholds, applied to the sky.
+   *
+   * These are domestic numbers, not meteorological ones: spray drifts above
+   * ~20 km/h, things need staking above ~40, and 2mm is the point where rain
+   * has actually watered something.
+   */
+  HC.WEATHER = {
+    rain_useful: 2,      // mm -- below this you are still the irrigation
+    wind_breezy: 20,     // km/h
+    wind_strong: 40,
+    uv_mid: 3,
+    uv_high: 8
+  };
+
+  /* One forecast entry to the three facts worth a glance, each already carrying
+     its tone so every card colours them identically. */
+  HC.weatherFacts = (f) => {
+    if (!f) return [];
+    const W = HC.WEATHER;
+    const mm = HC.num(f.precipitation);
+    const wind = HC.num(f.wind_speed);
+    const uv = HC.num(f.uv_index);
+
+    return [
+      { key: "rain", icon: "mdi:weather-rainy",
+        value: mm == null ? "--" : (mm < 0.1 ? "none" : HC.dec(mm, 1) + " mm"),
+        tone: mm == null ? "quiet" : mm >= W.rain_useful ? "wet" : mm >= 0.1 ? "" : "quiet" },
+      { key: "wind", icon: "mdi:weather-windy",
+        value: wind == null ? "--" : Math.round(wind) + " km/h",
+        tone: wind == null ? "quiet"
+            : wind >= W.wind_strong ? "bad" : wind >= W.wind_breezy ? "warn" : "quiet" },
+      { key: "uv", icon: "mdi:white-balance-sunny",
+        value: uv == null ? "--" : "UV " + Math.round(uv),
+        tone: uv == null ? "quiet"
+            : uv >= W.uv_high ? "bad" : uv >= W.uv_mid ? "warn" : "quiet" }
+    ];
+  };
+
   /* Whole days from `now`, built from calendar fields rather than by adding
      86,400,000ms -- Adelaide has daylight saving, and the arithmetic version
      lands on the wrong weekday twice a year. */
@@ -384,14 +427,10 @@
       const hi = HC.num(f.temperature);
       const lo = HC.num(f.templow);
       const mm = HC.num(f.precipitation);
-      /* Under a millimetre is not weather anyone plans around, but it is not
-         nothing either -- calling 0.9mm "dry" is the sort of small lie that
-         costs you the washing. */
-      const bits = [HC.condLabel(f.condition)];
-      bits.push(mm == null || mm < 0.2 ? "dry"
-              : mm < 1 ? "a spot of rain"
-              : `${HC.dec(mm, 1)} mm of rain`);
-
+      /* Temperatures answer "what do I wear"; rain, wind and UV answer the
+         questions that actually change a day -- whether the washing goes out,
+         whether the umbrella survives, whether anyone burns. The strip carries
+         all three in the same colours the Garden page uses. */
       return {
         weights: { morning: 1, midday: .5, afternoon: .5,
                    evening: .9, late: .6, night: .5 },
@@ -399,7 +438,10 @@
         pill: late ? "TOMORROW" : "TODAY", tone: "idle",
         state: hi == null ? "--"
              : Math.round(hi) + "°" + (lo == null ? "" : " / " + Math.round(lo) + "°"),
-        ctx: bits.join(" · "),
+        aside: HC.condLabel(f.condition),
+        metrics: HC.weatherFacts(f),
+        ctx: HC.condLabel(f.condition)
+           + (mm == null || mm < 0.2 ? " · dry" : ` · ${HC.dec(mm, 1)} mm of rain`),
         entity: ctx.weatherEntity
       };
     },

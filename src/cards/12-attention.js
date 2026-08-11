@@ -70,6 +70,23 @@
   .att.amber .stage.now ha-icon, .att.amber .stage.done ha-icon { color: var(--hc-amber); }
   .att.amber .stage.now .nm { color: var(--hc-amber-ink); }
 
+  /* ---- fact strip ---- *
+   * Three readings on one line, each coloured by its own band, in place of the
+   * caption. Same shape as the cycle strip and the same reason: it says more
+   * than a sentence in the same height, so the row does not grow.
+   */
+  .att .facts { display: flex; gap: 11px; margin-top: 9px; flex-wrap: nowrap;
+                overflow: hidden; }
+  .att .fact { display: flex; align-items: center; gap: 4px; min-width: 0; }
+  .att .fact ha-icon { --mdc-icon-size: 15px; width: 15px; height: 15px;
+                       flex: none; color: var(--hc-ink-2); }
+  .att .fact .v { font-family: var(--hc-mono); font-size: 12px; font-weight: 600;
+                  color: var(--hc-ink-2); white-space: nowrap; }
+  .att .fact.quiet ha-icon, .att .fact.quiet .v { color: var(--hc-faint); font-weight: 400; }
+  .att .fact.wet ha-icon,   .att .fact.wet .v   { color: var(--hc-blue); }
+  .att .fact.warn ha-icon,  .att .fact.warn .v  { color: var(--hc-amber-deep); }
+  .att .fact.bad ha-icon,   .att .fact.bad .v   { color: var(--hc-red-ink); }
+
   .att .prog { position: absolute; left: 0; right: 0; bottom: 0; height: 3px;
                background: var(--hc-rule); }
   .att .prog i { display: block; height: 100%; width: 0;
@@ -132,18 +149,19 @@
         HC.add(staterow, state, aside);
         const ctx = HC.el("div", "ctx");
         const stages = HC.el("div", "stages");
+        const facts = HC.el("div", "facts");
         const prog = HC.el("div", "prog");
         const fill = HC.el("i");
         HC.add(prog, fill);
-        HC.add(t, head, staterow, ctx, stages, prog);
+        HC.add(t, head, staterow, ctx, stages, facts, prog);
         /* Stagger the row 40ms apart, as the design specifies. */
         if (cfg.animate !== false) {
           t.classList.add("in");
           t.style.animationDelay = (i * 40) + "ms";
         }
         HC.add(grid, t);
-        return { slot: key, t, label, pill, state, aside, ctx, stages, prog, fill,
-                 subject: null, stageKey: null };
+        return { slot: key, t, label, pill, state, aside, ctx, stages, facts,
+                 prog, fill, subject: null, stageKey: null, factKey: null };
       });
 
       this._subscribe();
@@ -226,9 +244,10 @@
       HC.setText(tile.state, spec.state);
       HC.setText(tile.aside, spec.aside || "");
       this._setStages(tile, spec);
-      /* The strip already names the stage, so the sentence would only repeat
-         it. Where there is no strip the sentence is all there is. */
-      tile.ctx.style.display = spec.stages ? "none" : "";
+      this._setFacts(tile, spec);
+      /* A strip says more than the sentence would, in the same height. Where
+         there is no strip the sentence is all there is. */
+      tile.ctx.style.display = (spec.stages || spec.metrics) ? "none" : "";
       HC.setText(tile.ctx, spec.ctx);
 
       const tone = spec.tone === "bad" ? "bad"
@@ -305,6 +324,34 @@
         const done = spec.stage != null && i < spec.stage;
         const now = spec.stage != null && i === spec.stage;
         cell.className = "stage" + (now ? " now" : done ? " done" : "");
+      });
+    }
+
+    /* Three readings and their bands. Rebuilt only when the set of readings
+       changes, which is when a different candidate takes the slot. */
+    _setFacts(tile, spec) {
+      const facts = spec.metrics || null;
+      const key = facts ? facts.map((f) => f.key).join("|") : "";
+      if (tile.factKey !== key) {
+        tile.factKey = key;
+        tile.facts.textContent = "";
+        tile.factNodes = (facts || []).map((f) => {
+          const cell = HC.el("div", "fact");
+          const icon = document.createElement("ha-icon");
+          icon.setAttribute("icon", f.icon || "mdi:circle-small");
+          const v = HC.el("span", "v");
+          HC.add(cell, icon, v);
+          HC.add(tile.facts, cell);
+          return { cell, v };
+        });
+      }
+      tile.facts.style.display = facts ? "" : "none";
+      if (!facts) return;
+      facts.forEach((f, i) => {
+        const n = (tile.factNodes || [])[i];
+        if (!n) return;
+        n.cell.className = "fact" + (f.tone ? " " + f.tone : "");
+        HC.setText(n.v, f.value);
       });
     }
 

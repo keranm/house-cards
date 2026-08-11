@@ -71,11 +71,12 @@
     exceptional: "mdi:alert-circle-outline"
   };
 
-  /* Bands. Wind is in km/h and these are gardening numbers, not storm numbers:
-     spraying drifts above ~20, and staking matters above ~40. */
-  const WIND_BREEZY = 20;
-  const WIND_STRONG = 40;
-  const RAIN_USEFUL = 2;
+  /* Bands live in HC.WEATHER, shared with the attention row's weather tile.
+     They were local to this card first; two cards colouring the same afternoon
+     breezy and calm is the sky version of the battery-threshold bug. */
+  const WIND_BREEZY = HC.WEATHER.wind_breezy;
+  const WIND_STRONG = HC.WEATHER.wind_strong;
+  const RAIN_USEFUL = HC.WEATHER.rain_useful;
 
   class GardenForecast extends HC.Card {
     constructor() {
@@ -195,7 +196,7 @@
         HC.add(uvEl,
           HC.el("span", "lbl", "UV"),
           HC.el("span", uv == null ? "quiet"
-                : uv >= 8 ? "uv-hi" : uv >= 3 ? "uv-mid" : "uv-ok",
+                : uv >= HC.WEATHER.uv_high ? "uv-hi" : uv >= HC.WEATHER.uv_mid ? "uv-mid" : "uv-ok",
                 uv == null ? "--" : HC.dec(uv, 1)));
         HC.add(meta, uvEl);
 
@@ -231,7 +232,7 @@
       else if (w >= WIND_BREEZY) bits.push(`breeziest ${name(windiest)} at ${Math.round(w)} km/h`);
 
       const u = HC.num(maxUv.uv_index) || 0;
-      if (u >= 8) bits.push(`UV peaks at ${HC.dec(u, 1)} ${name(maxUv)} — shade anything just planted`);
+      if (u >= HC.WEATHER.uv_high) bits.push(`UV peaks at ${HC.dec(u, 1)} ${name(maxUv)} — shade anything just planted`);
 
       /* Each clause is built independently, so each has to start as a
          sentence -- joining them raw produced "...Saturday. breeziest

@@ -329,6 +329,43 @@ check("an acknowledgement from before the cycle does not pre-clear it",
 check("the finished tile offers a dismissal target",
       ackAt(30, 10000).dismiss.entity === roles.laundry.acknowledged);
 
+console.log("\nweather facts");
+const facts = (o) => Object.fromEntries(
+  HC.weatherFacts(o).map((f) => [f.key, f]));
+check("the three facts are rain, wind and UV", (() => {
+  const f = facts({ precipitation: 1, wind_speed: 10, uv_index: 1 });
+  return f.rain && f.wind && f.uv;
+})());
+check("useful rain reads wet, a sprinkle does not",
+      facts({ precipitation: 4 }).rain.tone === "wet"
+   && facts({ precipitation: 0.5 }).rain.tone === "");
+check("no rain is quiet, not alarming",
+      facts({ precipitation: 0 }).rain.tone === "quiet"
+   && facts({ precipitation: 0 }).rain.value === "none");
+check("wind bands match the garden card's",
+      facts({ wind_speed: 45 }).wind.tone === "bad"
+   && facts({ wind_speed: 25 }).wind.tone === "warn"
+   && facts({ wind_speed: 8 }).wind.tone === "quiet");
+check("UV bands do too",
+      facts({ uv_index: 9 }).uv.tone === "bad"
+   && facts({ uv_index: 5 }).uv.tone === "warn"
+   && facts({ uv_index: 1 }).uv.tone === "quiet");
+check("a forecast missing a field says so rather than showing zero",
+      facts({}).wind.value === "--" && facts({}).uv.value === "--");
+check("both cards read one set of bands",
+      HC.WEATHER.wind_breezy === 20 && HC.WEATHER.wind_strong === 40
+   && HC.WEATHER.rain_useful === 2);
+check("the weather tile carries the strip", (() => {
+  const p = HC.contextCandidates(hass, cconf, th, {
+    now: new Date(2026, 7, 11, 7, 5),
+    forecast: [{ condition: "rainy", temperature: 14, templow: 11,
+                 precipitation: 1.9, wind_speed: 31, uv_index: 2 }]
+  });
+  const w = p.ambient.find((c) => c.key === "weather");
+  return w && w.metrics.length === 3 && w.aside === "Rain"
+      && w.metrics[0].value === "1.9 mm" && w.metrics[1].value === "31 km/h";
+})());
+
 console.log("\ncycle strip");
 const STAGES = roles.laundry.stages;
 check("every stage a running state can be in is drawn", (() => {
