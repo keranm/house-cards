@@ -470,9 +470,25 @@
     house: {}
   };
 
+  /* Batteries get two action lines, not one, because there are two different
+     jobs behind the number. A phone at 30% is fine -- it gets plugged in
+     tonight like every night, and nobody wants to be told. A door sensor at
+     30% is also fine, and will be for months. What is worth saying is "this
+     needs plugging in NOW" and "this cell is about to die", and those are
+     nowhere near the same percentage.
+
+     One shared line at 40% is what produced "57 % lowest · nothing under the
+     40% line" -- a tile that is technically true, permanently on screen, and
+     of no use to anyone. */
   HC.THRESHOLDS = {
-    battery_low:  { default: 40,    unit: "%",     helper: null },
+    battery_recharge: { default: 20, unit: "%", helper: null },   // plug it in
+    battery_replace:  { default: 5,  unit: "%", helper: null },   // swap the cell
     battery_show: { default: 80,    unit: "%",     helper: null },
+    /* The house battery's state of charge is a different quantity from a
+       device's, and shared the old `battery_low` only by an accident of
+       naming: one is "the pack is running down tonight", the other is "go and
+       find a AAA". */
+    house_battery_low: { default: 20, unit: "%", helper: null },
     room_humid:   { default: 75,    unit: "%",     helper: null },
     room_co2:     { default: 800,   unit: "ppm",   helper: null },
     room_co2_bad: { default: 1600,  unit: "ppm",   helper: null },
@@ -689,6 +705,39 @@
       }
       return out.sort((a, b) => a.value - b.value);
     },
+
+    /* Which of the two action lines a battery answers to. A thing you plug in
+       wants warning at 20%; a cell you unwrap and swap wants warning at 5%,
+       because telling anyone earlier than that just trains them to ignore it.
+
+       The match list lives in the role map -- what is rechargeable in a house
+       is a fact about that house -- and the default below only has to be good
+       enough for a fresh instance with no configuration. */
+    batteryKind(reading, cfg) {
+      const hay = (reading.id + " " + reading.name).toLowerCase();
+      const match = (list) => (list || []).some((s) => hay.indexOf(String(s).toLowerCase()) >= 0);
+      if (match((cfg || {}).replaceable)) return "replace";
+      if (match((cfg || {}).rechargeable)) return "recharge";
+      return /phone|ipad|tablet|laptop|macbook|watch|vacuum|robot|buds|headphone/.test(hay)
+        ? "recharge" : "replace";
+    }
+  });
+
+  /* Does this battery want a human to do something, and what?
+     The single place that decides, so the attention row and the batteries card
+     cannot disagree -- which they did, at 40%, for months. */
+  HC.batteryAction = (reading, th, cfg) => {
+    const kind = HC.discover.batteryKind(reading, cfg);
+    const line = kind === "recharge" ? th.battery_recharge : th.battery_replace;
+    return {
+      kind,
+      line,
+      needs: reading.value != null && reading.value < line,
+      verb: kind === "recharge" ? "charge" : "replace"
+    };
+  };
+
+  HC.discover = Object.assign(HC.discover, {
 
     lights(hass, cfg) {
       cfg = cfg || {};
@@ -1046,6 +1095,59 @@
    * against each other; `weights` scores the ambient ones per day part.
    */
   const STICKY = {
+    /* Something is open. This is the only state of a door worth a permanent
+       tile -- "All closed" was on screen every hour of every day and told
+       nobody anything, which is the same fault the idle washing machine had.
+       A change is worth a moment's confirmation and then silence, so a
+       just-shut door gets a short-lived tile of its own below. */
+    doors(hass, config, th, ctx) {
+      const roles = HC.roles(config, "openings", hass) || [];
+      const live = roles.map((o) => ({ o, r: HC.read(hass, o.entity) }))
+                        .filter((x) => x.r.ok);
+      const open = live.filter((x) => x.r.on);
+      if (!open.length) return null;
+
+      const longest = open.map((x) => x.r)
+        .sort((a, b) => new Date(a.changed) - new Date(b.changed))[0];
+      return {
+        rank: 155, label: "Doors & windows", amber: true,
+        pill: open.length === 1 ? "OPEN" : `${open.length} OPEN`, tone: "warn",
+        state: open.length === 1 ? open[0].o.name : `${open.length} open`,
+        aside: HC.ago(longest.changed),
+        ctx: open.length === 1
+          ? `Open ${HC.ago(longest.changed)}`
+          : open.map((x) => x.o.name).join(" · "),
+        entity: open[0].o.entity
+      };
+    },
+
+    /* Only when someone would actually get up and do something. A phone at 30%
+       is not news; it gets plugged in tonight like every night. */
+    batteries(hass, config, th, ctx) {
+      const cfg = HC.roles(config, "batteries", hass);
+      const all = HC.discover.batteries(hass, cfg);
+      const needy = all.map((b) => ({ b, a: HC.batteryAction(b, th, cfg) }))
+                       .filter((x) => x.a.needs)
+                       .sort((x, y) => x.b.value - y.b.value);
+      if (!needy.length) return null;
+
+      const worst = needy[0];
+      const name = worst.b.name.replace(/ Battery( Level)?$/i, "");
+      const others = needy.length - 1;
+      return {
+        rank: worst.b.value < 5 ? 148 : 118,
+        label: "Batteries", pill: `${needy.length} NEED${needy.length === 1 ? "S" : ""} YOU`,
+        tone: worst.b.value < 5 ? "bad" : "warn",
+        amber: worst.b.value >= 5,
+        state: `${Math.round(worst.b.value)} %`,
+        aside: worst.a.verb === "charge" ? "plug in" : "new cell",
+        ctx: others
+          ? `${name} · and ${others} other${others === 1 ? "" : "s"}`
+          : `${name} · ${worst.a.verb === "charge" ? "wants charging" : "wants a new cell"}`,
+        entity: worst.b.id
+      };
+    },
+
     /* Bin night outranks everything else here: it is the only one with a
        deadline you cannot make up later. */
     bins(hass, config, th, ctx) {
@@ -1131,17 +1233,32 @@
              < Number(config.unload_window_hours || 3);
 
       if (has(cfg.finished_states, status.state) || recent) {
-        const done = HC.cycle(hass, cfg, status.state, null);
+        /* Dismissal, so the tile goes when the washing is actually dealt with
+           rather than when a timer says so -- the load can be hung out in ten
+           minutes or sit there for three hours, and only a person knows which.
+           It is stored on the box rather than in the browser so tapping it on
+           the kitchen tablet also clears it on everyone's phone.
+           HA's input_datetime state string is naive local time, so the epoch
+           `timestamp` attribute is the only safe way to read it. */
+        const ack = HC.read(hass, cfg.acknowledged);
+        const ackAt = ack.ok ? HC.num(ack.attrs.timestamp) : null;
+        if (at_ && !isNaN(at_) && ackAt != null && ackAt * 1000 >= at_.getTime()) {
+          return null;
+        }
+
+        /* No strip here, though every stage would light. A finished cycle has
+           no progress left to show, and the row of ticks was crowding out the
+           only thing this tile now needs to say: that tapping it makes it go
+           away. The strip earns its place while a wash is running. */
         return {
           rank: 140, label: "Laundry", pill: "UNLOAD ME", tone: "warn",
           amber: true, state: "Finished",
           aside: recent ? HC.ago(at_) : null,
-          ctx: recent ? `Cycle finished ${HC.ago(at_)}` : "Waiting to be emptied",
-          /* Every stage lit is the clearest way to say the cycle is over --
-             clearer than the word, and it is the same picture the machine's
-             own panel shows. */
-          stages: done.stages, stage: done.stages ? done.stages.length : null,
+          ctx: cfg.acknowledged
+            ? "Tap when it is hung out"
+            : (recent ? `Cycle finished ${HC.ago(at_)}` : "Waiting to be emptied"),
           progress: 1,
+          dismiss: cfg.acknowledged ? { entity: cfg.acknowledged } : null,
           entity: cfg.status
         };
       }
@@ -1373,7 +1490,12 @@
        read at all. */
     air(hass, config, th, ctx) {
       const worst = HC.worstAir(hass, config);
-      if (!worst || worst.ppm < th.room_co2 || worst.ppm >= th.room_co2_bad) return null;
+      /* A margin over the line, not the line itself. 801 ppm against an 800
+         line is true and worthless -- the same fault as "57 % lowest, nothing
+         under the 40% line". Fifteen percent over is where a closed room has
+         actually gone stuffy rather than merely crossed a number. */
+      if (!worst || worst.ppm < th.room_co2 * 1.15
+          || worst.ppm >= th.room_co2_bad) return null;
       return {
         weights: { night: .3, morning: .8, midday: .4,
                    afternoon: .4, evening: .6, late: .5 },
@@ -1381,6 +1503,32 @@
         state: HC.commas(worst.ppm) + " ppm",
         ctx: `${worst.title} · above the ${HC.commas(th.room_co2)} ppm line`,
         entity: worst.entity
+      };
+    },
+
+    /* "The garage just shut" is worth a moment and then nothing. This is the
+       confirmation half of the door story: it appears for a few minutes after
+       something closes and then stops, rather than sitting on SECURE forever.
+       High weight everywhere, because when it is true it is the newest thing
+       on the page and it is about to stop being true. */
+    doors_recent(hass, config, th, ctx) {
+      const roles = HC.roles(config, "openings", hass) || [];
+      const live = roles.map((o) => ({ o, r: HC.read(hass, o.entity) }))
+                        .filter((x) => x.r.ok);
+      if (!live.length || live.some((x) => x.r.on)) return null;   // open is sticky's job
+
+      const last = live.sort((a, b) =>
+        new Date(b.r.changed) - new Date(a.r.changed))[0];
+      const mins = (ctx.now.getTime() - new Date(last.r.changed).getTime()) / 60000;
+      const window_ = Number(config.door_recent_minutes || 5);
+      if (!isFinite(mins) || mins < 0 || mins > window_) return null;
+
+      return {
+        weights: { night: 1, morning: 1, midday: 1, afternoon: 1, evening: 1, late: 1 },
+        label: "Doors & windows", pill: "JUST SHUT", tone: "good",
+        state: "All closed",
+        ctx: `${last.o.name} closed ${HC.ago(last.r.changed)}`,
+        entity: last.o.entity
       };
     },
 
@@ -1833,7 +1981,7 @@
       if (charging) { tone = "good"; accent = "var(--hc-green)"; label = "CHARGING"; }
       else if (discharging) {
         label = "DISCHARGING";
-        if (pct < (this._th.battery_low || 40)) {
+        if (pct < this._th.house_battery_low) {
           tone = "warn"; accent = "var(--hc-amber)";
         } else { tone = "good"; accent = "var(--hc-green)"; }
       }
@@ -1878,24 +2026,28 @@
   /* ------------------------------------------------------------------ *
    * hc-attention
    * ------------------------------------------------------------------ *
-   * The row you read before you walk out of the room.
+   * The row you read before you walk out of the room. Four slots, none of them
+   * reserved: every tile is a candidate from HC.contextCandidates, and each has
+   * to earn its place every fifteen seconds.
    *
-   * Two of its four tiles are fixed, because two questions are always worth
-   * asking: is the house shut, is anything flat. The middle two are a stage.
-   * What stands on it comes from HC.contextCandidates -- a live fact if there
-   * is one (bins tonight, washer running, air gone off), and otherwise
-   * something the hour makes worth knowing, rotating on a timer.
+   * Nothing is pinned because everything that was pinned went stale. Laundry
+   * read "Off · last cycle finished 2 days ago" nine days in ten. Bins sat
+   * amber telling you to put them out for eleven hours after the truck had
+   * been. "All closed" was true every hour of every day. "57 % lowest ·
+   * nothing under the 40% line" is a sentence nobody has ever acted on. Each
+   * was honest, permanently on screen, and worth nothing.
    *
-   * This replaced a fixed Bins + Laundry pair. The laundry tile read "Off ·
-   * last cycle finished 2 days ago" roughly nine days in ten, and the bin tile
-   * sat amber telling you to put the bins out for eleven hours after the truck
-   * had already been. Both were honest and neither was worth a quarter of the
-   * row.
+   * So the rule is: a tile appears when a person would do something about it,
+   * or when the hour makes it worth knowing, and it leaves when it stops being
+   * either. A door tile means a door is open. A battery tile means something
+   * wants charging now. When the house has nothing to say, the slots fill with
+   * things worth knowing anyway -- the weather, how much daylight is left, what
+   * power costs right now.
    *
-   * The battery tile stays here rather than deferring to the Batteries section
-   * downstream, and both read `battery_low` from HC.thresholds -- an early
-   * draft had this row calling a device green while that section called the
-   * same device red.
+   * Batteries answer to two action lines rather than one, both from
+   * HC.thresholds, and the Batteries section downstream reads the same pair --
+   * an early draft had this row calling a device green while that section
+   * called it red.
    */
 
   const ATT_CSS = `
@@ -1961,10 +2113,15 @@
   @media (max-width: 520px) { .tiles { grid-template-columns: 1fr; } }
   `;
 
-  /* "context" is a slot rather than a tile: it is filled from the candidate
-     pool at render time and may hold a different subject on every rotation. */
+  /* Every slot is now a stage. Doors and batteries used to be nailed down
+     either end of the row, and both spent almost all of their time saying
+     nothing: "All closed" is true every hour of every day, and "57 % lowest ·
+     nothing under the 40% line" is a fact nobody has ever acted on. They are
+     candidates now, and they earn a slot only when a person would do something
+     about them. `tiles` still accepts the old fixed names for anyone who wants
+     one pinned. */
   const SLOT_KEYS = ["doors", "context", "batteries"];
-  const DEFAULT_SLOTS = ["doors", "context", "context", "batteries"];
+  const DEFAULT_SLOTS = ["context", "context", "context", "context"];
 
   class Attention extends HC.Card {
     constructor() {
@@ -2112,7 +2269,15 @@
         void tile.t.offsetWidth;
         tile.t.classList.add("swap");
       }
-      tile.t.onclick = spec.entity ? () => this.moreInfo(spec.entity) : null;
+      /* A tile that can be dismissed is dismissed by tapping it. Anything else
+         opens the entity behind it, so every number on the page is still a way
+         in to what produced it. */
+      if (spec.dismiss) {
+        tile.t.onclick = () => this._dismiss(spec.dismiss);
+        tile.t.style.cursor = "pointer";
+      } else {
+        tile.t.onclick = spec.entity ? () => this.moreInfo(spec.entity) : null;
+      }
     }
 
     update() {
@@ -2122,14 +2287,11 @@
         forecast: this._forecast,
         weatherEntity: this._weatherEntity
       });
-      const wanted = this._tiles.filter((t) => t.slot === "context").length;
-      const picks = HC.fillSlots(pool, wanted, this._tick);
+      const picks = HC.fillSlots(pool, this._tiles.length, this._tick);
 
       let i = 0;
       for (const tile of this._tiles) {
-        if (tile.slot === "doors") this._set(tile, this._doors());
-        else if (tile.slot === "batteries") this._set(tile, this._batteries());
-        else this._set(tile, this._contextTile(picks[i++]));
+        this._set(tile, this._contextTile(picks[i++]));
       }
       /* First paint should not fade -- the row already has its entry
          animation, and running both makes the tiles arrive twice. */
@@ -2170,6 +2332,20 @@
       });
     }
 
+    /* Stamp "dealt with" on the box rather than in this browser, so clearing
+       it on the kitchen tablet also clears it on everyone's phone. */
+    _dismiss(d) {
+      if (!d || !d.entity) return;
+      const now = new Date();
+      const pad = (n) => String(n).padStart(2, "0");
+      this.callService("input_datetime", "set_datetime", {
+        entity_id: d.entity,
+        /* HA wants naive local time here, and reads it back the same way. */
+        datetime: `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} `
+                + `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`
+      });
+    }
+
     /* A candidate, or the honest version of an empty stage. */
     _contextTile(pick) {
       if (!pick) {
@@ -2178,66 +2354,6 @@
                  ctx: "No bins, no washing, nothing to chase" };
       }
       return Object.assign({ subject: pick.key }, pick);
-    }
-
-    /* ---- doors & windows ------------------------------------------- */
-    _doors() {
-      const roles = HC.roles(this._config, "openings", this.hass);
-      const reads = roles.map((o) => ({ o, r: HC.read(this.hass, o.entity) }));
-      const live = reads.filter((x) => x.r.ok);
-      const open = live.filter((x) => x.r.on);
-
-      if (!live.length) {
-        return { subject: "doors-gap", label: "Doors & windows", pill: "GAP",
-                 tone: "idle", state: "No data",
-                 ctx: "No contact sensors reporting" };
-      }
-
-      const last = live.map((x) => x.r)
-        .sort((a, b) => new Date(b.changed) - new Date(a.changed))[0];
-
-      if (open.length) {
-        return {
-          subject: "doors-open", label: "Doors & windows",
-          pill: `${open.length} OPEN`, tone: "warn", amber: true,
-          state: open.length === 1 ? open[0].o.name : `${open.length} open`,
-          ctx: open.map((x) => x.o.name).join(" · "),
-          entity: open[0].o.entity
-        };
-      }
-      return {
-        subject: "doors-shut", label: "Doors & windows", pill: "SECURE",
-        tone: "good", state: "All closed",
-        ctx: `${live.length} sensors · ${last.name.replace(/( Sensor)?( Door| Contact)?$/i, "")} closed ${HC.ago(last.changed)}`,
-        entity: live[0].o.entity
-      };
-    }
-
-    /* ---- batteries --------------------------------------------------- */
-    _batteries() {
-      const cfg = HC.roles(this._config, "batteries", this.hass);
-      const all = HC.discover.batteries(this.hass, cfg);
-      const low = this._th.battery_low;
-
-      if (!all.length) {
-        return { subject: "bat-gap", label: "Batteries", pill: "GAP",
-                 tone: "idle", state: "No data",
-                 ctx: "No battery sensors found" };
-      }
-
-      const under = all.filter((b) => b.value < low);
-      const lowest = all[0];
-      const shortName = (n) => n.replace(/ Battery( Level)?$/i, "");
-
-      return under.length
-        ? { subject: "bat-low", label: "Batteries", pill: `${under.length} LOW`,
-            tone: "bad", state: `${Math.round(lowest.value)} % lowest`,
-            ctx: `${shortName(lowest.name)} · ${under.length} under the ${low}% line`,
-            entity: lowest.id }
-        : { subject: "bat-ok", label: "Batteries", pill: "NONE LOW",
-            tone: "good", state: `${Math.round(lowest.value)} % lowest`,
-            ctx: `${shortName(lowest.name)} · nothing under the ${low}% line`,
-            entity: lowest.id };
     }
 
     getCardSize() { return 3; }
@@ -3436,11 +3552,21 @@
       return root;
     }
 
-    _band(pct) {
-      if (pct < this._th.battery_low) {
+    /* Red means someone has to do something, and what counts as that depends
+       on the device: a phone at 15% wants plugging in tonight, a door sensor at
+       15% has months left. HC.batteryAction owns that judgement so this card
+       and the attention row cannot disagree about it -- they did, at a single
+       shared 40%, which called half the house critical and the other half fine
+       for no reason either could explain. */
+    _band(reading) {
+      const act = HC.batteryAction(reading, this._th, this._cfgBat);
+      if (act.needs) {
         return { fill: "var(--hc-red)", text: "var(--hc-red-ink)", critical: true };
       }
-      if (pct < 70) return { fill: "var(--hc-amber)", text: "var(--hc-amber-deep)" };
+      /* Amber is "getting there": within twice its own action line. */
+      if (reading.value < act.line * 2) {
+        return { fill: "var(--hc-amber)", text: "var(--hc-amber-deep)" };
+      }
       return { fill: "var(--hc-green)", text: "var(--hc-ink)" };
     }
 
@@ -3478,7 +3604,7 @@
         /* Re-append in rank order so the grid stays worst-first as values move. */
         HC.add(this._grid, t.tile);
 
-        const band = this._band(b.value);
+        const band = this._band(b);
         HC.setText(t.name, b.name.replace(/ Battery( Level)?$/i, ""));
         HC.setText(t.pct, Math.round(b.value) + "%");
         t.pct.style.color = band.text;
@@ -3917,7 +4043,9 @@
 
         const batt = HC.read(this.hass, t.battery).value;
         HC.setText(r.vBatt, batt == null ? "--" : Math.round(batt) + "%");
-        r.vBatt.style.color = batt != null && batt < this._th.battery_low
+        /* A valve is a replaceable cell, but a flat one means the garden does
+           not get watered, so it is worth flagging at the earlier line. */
+        r.vBatt.style.color = batt != null && batt < this._th.battery_recharge
           ? "var(--hc-red-ink)" : "";
       }
 

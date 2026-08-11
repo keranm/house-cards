@@ -71,6 +71,39 @@
       return out.sort((a, b) => a.value - b.value);
     },
 
+    /* Which of the two action lines a battery answers to. A thing you plug in
+       wants warning at 20%; a cell you unwrap and swap wants warning at 5%,
+       because telling anyone earlier than that just trains them to ignore it.
+
+       The match list lives in the role map -- what is rechargeable in a house
+       is a fact about that house -- and the default below only has to be good
+       enough for a fresh instance with no configuration. */
+    batteryKind(reading, cfg) {
+      const hay = (reading.id + " " + reading.name).toLowerCase();
+      const match = (list) => (list || []).some((s) => hay.indexOf(String(s).toLowerCase()) >= 0);
+      if (match((cfg || {}).replaceable)) return "replace";
+      if (match((cfg || {}).rechargeable)) return "recharge";
+      return /phone|ipad|tablet|laptop|macbook|watch|vacuum|robot|buds|headphone/.test(hay)
+        ? "recharge" : "replace";
+    }
+  });
+
+  /* Does this battery want a human to do something, and what?
+     The single place that decides, so the attention row and the batteries card
+     cannot disagree -- which they did, at 40%, for months. */
+  HC.batteryAction = (reading, th, cfg) => {
+    const kind = HC.discover.batteryKind(reading, cfg);
+    const line = kind === "recharge" ? th.battery_recharge : th.battery_replace;
+    return {
+      kind,
+      line,
+      needs: reading.value != null && reading.value < line,
+      verb: kind === "recharge" ? "charge" : "replace"
+    };
+  };
+
+  HC.discover = Object.assign(HC.discover, {
+
     lights(hass, cfg) {
       cfg = cfg || {};
       const excl = new Set(cfg.exclude || []);

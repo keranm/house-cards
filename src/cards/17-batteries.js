@@ -69,11 +69,21 @@
       return root;
     }
 
-    _band(pct) {
-      if (pct < this._th.battery_low) {
+    /* Red means someone has to do something, and what counts as that depends
+       on the device: a phone at 15% wants plugging in tonight, a door sensor at
+       15% has months left. HC.batteryAction owns that judgement so this card
+       and the attention row cannot disagree about it -- they did, at a single
+       shared 40%, which called half the house critical and the other half fine
+       for no reason either could explain. */
+    _band(reading) {
+      const act = HC.batteryAction(reading, this._th, this._cfgBat);
+      if (act.needs) {
         return { fill: "var(--hc-red)", text: "var(--hc-red-ink)", critical: true };
       }
-      if (pct < 70) return { fill: "var(--hc-amber)", text: "var(--hc-amber-deep)" };
+      /* Amber is "getting there": within twice its own action line. */
+      if (reading.value < act.line * 2) {
+        return { fill: "var(--hc-amber)", text: "var(--hc-amber-deep)" };
+      }
       return { fill: "var(--hc-green)", text: "var(--hc-ink)" };
     }
 
@@ -111,7 +121,7 @@
         /* Re-append in rank order so the grid stays worst-first as values move. */
         HC.add(this._grid, t.tile);
 
-        const band = this._band(b.value);
+        const band = this._band(b);
         HC.setText(t.name, b.name.replace(/ Battery( Level)?$/i, ""));
         HC.setText(t.pct, Math.round(b.value) + "%");
         t.pct.style.color = band.text;

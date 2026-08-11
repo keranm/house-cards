@@ -180,7 +180,9 @@
 
         const batt = HC.read(this.hass, t.battery).value;
         HC.setText(r.vBatt, batt == null ? "--" : Math.round(batt) + "%");
-        r.vBatt.style.color = batt != null && batt < this._th.battery_low
+        /* A valve is a replaceable cell, but a flat one means the garden does
+           not get watered, so it is worth flagging at the earlier line. */
+        r.vBatt.style.color = batt != null && batt < this._th.battery_recharge
           ? "var(--hc-red-ink)" : "";
       }
 

@@ -49,7 +49,8 @@ const house = JSON.parse(fs.readFileSync(path.join(__dirname, "house_roles.json"
 const helpers = Object.fromEntries(Object.entries(house.thresholds)
   .filter(([, v]) => v.helper).map(([k, v]) => [k, v.helper]));
 const th = HC.thresholds(hass, {}, helpers);
-check("battery_low defaults to 40", th.battery_low === 40);
+check("the two battery action lines are 20 and 5",
+      th.battery_recharge === 20 && th.battery_replace === 5);
 check("a literal beats a helper (documented order)",
       HC.thresholds(hass, { room_co2: 1234 }, helpers).room_co2 === 1234);
 check("room_co2 comes from the climate helper",
@@ -57,8 +58,8 @@ check("room_co2 comes from the climate helper",
       `got ${th.room_co2} from ${th.room_co2__from}`);
 check("room_co2_bad comes from the climate helper",
       th.room_co2_bad === 1600 && th.room_co2_bad__from === "input_number.climate_co2_bad");
-const thOver = HC.thresholds(hass, { battery_low: 25 });
-check("card config overrides a threshold", thOver.battery_low === 25);
+const thOver = HC.thresholds(hass, { battery_recharge: 25 });
+check("card config overrides a threshold", thOver.battery_recharge === 25);
 
 console.log("\nrole resolution");
 /* The bundle ships generic; the instance map lives beside it and is what the
@@ -126,6 +127,36 @@ for (const [key, id] of Object.entries(roles.context)) {
   check(`context.${key} resolves`, hass.states[id] != null, id);
 }
 
+console.log("\nbattery action lines");
+/* One shared 40% is what produced "57 % lowest -- nothing under the 40% line":
+   permanently on screen, technically true, never once acted on. */
+const bcfg = roles.batteries;
+const act = (id, name, pct) => HC.batteryAction(
+  { id, name, value: pct }, th, bcfg);
+check("a phone answers to the charge line",
+      act("sensor.kerans_iphone_battery_level", "Keran's iPhone Battery", 30).kind === "recharge");
+check("a door sensor answers to the replace line",
+      act("sensor.sonoff_snzb_04pr2_battery", "Garage Door Sensor Battery", 30).kind === "replace");
+check("a phone at 30% is not news", !act("sensor.kerans_iphone_battery_level", "x", 30).needs);
+check("a phone at 15% is", act("sensor.kerans_iphone_battery_level", "x", 15).needs);
+check("a coin cell at 15% is not news",
+      !act("sensor.hobeian_zg_204zv_battery", "Presence Sense Battery", 15).needs);
+check("a coin cell at 3% is",
+      act("sensor.hobeian_zg_204zv_battery", "Presence Sense Battery", 3).needs);
+check("Summer's phone is a phone despite the device name",
+      act("sensor.stay_battery_level", "stay Battery Level", 15).needs);
+check("every discovered battery classifies without a fallback guess", (() => {
+  const all = HC.discover.batteries(hass, bcfg);
+  return all.length > 20 && all.every((b) => {
+    const a = HC.batteryAction(b, th, bcfg);
+    return a.kind === "recharge" || a.kind === "replace";
+  });
+})());
+check("nothing in this house currently needs a human", (() => {
+  const all = HC.discover.batteries(hass, bcfg);
+  return all.filter((b) => HC.batteryAction(b, th, bcfg).needs).length === 0;
+})());
+
 console.log("\nbin window");
 /* Collection is a Tuesday here, so daysTo is shifted to stand in for other
    days rather than waiting a week to find out the window is wrong. */
@@ -179,10 +210,27 @@ check("no weather forecast means no weather tile, not an empty one",
 const worst = HC.worstAir(hass, cconf);
 check("worst air comes from the room map",
       worst && roles.rooms.some((r) => r.co2 === worst.entity), worst && worst.entity);
-check("stuffy rotates, bad sticks",
-      poolAt(7).ambient.some((c) => c.key === "air")
-   && !poolAt(7).sticky.some((c) => c.key === "air"),
-      `worst ${worst && worst.ppm}ppm vs ok ${th.room_co2} / bad ${th.room_co2_bad}`);
+/* Built rather than read from the dump: the live figure drifts across the
+   line all day, so asserting against it tests the weather, not the rule. */
+const airAt = (ppm) => {
+  const rm = roles.rooms.find((r) => r.co2);
+  const st = JSON.parse(JSON.stringify(hass.states));
+  for (const r of roles.rooms) if (r.co2) st[r.co2] = { state: "400", attributes: {} };
+  st[rm.co2] = { state: String(ppm), attributes: {} };
+  return HC.contextCandidates({ states: st }, cconf, th, { now: new Date(2026, 7, 11, 7, 5) });
+};
+check("stuffy rotates rather than sticking", (() => {
+  const p = airAt(Math.round(th.room_co2 * 1.4));
+  return p.ambient.some((c) => c.key === "air") && !p.sticky.some((c) => c.key === "air");
+})());
+check("past the bad line it sticks", (() => {
+  const p = airAt(Math.round(th.room_co2_bad) + 50);
+  return p.sticky.some((c) => c.key === "air") && !p.ambient.some((c) => c.key === "air");
+})());
+check("fresh air says nothing at all", (() => {
+  const p = airAt(450);
+  return !p.sticky.some((c) => c.key === "air") && !p.ambient.some((c) => c.key === "air");
+})());
 
 console.log("\nlaundry");
 /* remaining_time is device_class timestamp -- when the cycle ENDS, not the
@@ -255,6 +303,32 @@ check("a paused washer says so", laundryAt("pause").pill === "PAUSED");
 check("a fault outranks a running cycle",
       laundryAt("error").rank > laundryAt("rinsing").rank);
 
+/* Tapping the finished tile stamps input_datetime.laundry_acknowledged. The
+   stamp only counts if it is AFTER the cycle finished, so it clears this load
+   without pre-clearing the next one. And the timestamp attribute is the only
+   safe read -- the state string is naive local time. */
+const ackAt = (finishedMinsAgo, ackMinsAgo) => {
+  const st = JSON.parse(JSON.stringify(hass.states));
+  st[roles.laundry.status].state = "end";
+  st[roles.laundry.remaining].state = "unknown";
+  st[roles.laundry.total_time] = { state: "44", attributes: {} };
+  st[roles.laundry.last_event].state =
+    new Date(Date.now() - finishedMinsAgo * 60000).toISOString();
+  st[roles.laundry.acknowledged] = {
+    state: "irrelevant -- naive local time, never parsed",
+    attributes: { timestamp: (Date.now() - ackMinsAgo * 60000) / 1000 }
+  };
+  return HC.contextCandidates({ states: st }, cconf, th, {})
+           .sticky.find((c) => c.key === "laundry");
+};
+check("an unacknowledged finished load asks to be unloaded",
+      ackAt(30, 10000) != null);
+check("acknowledging it after the cycle clears the tile", ackAt(30, 5) == null);
+check("an acknowledgement from before the cycle does not pre-clear it",
+      ackAt(30, 90) != null);
+check("the finished tile offers a dismissal target",
+      ackAt(30, 10000).dismiss.entity === roles.laundry.acknowledged);
+
 console.log("\ncycle strip");
 const STAGES = roles.laundry.stages;
 check("every stage a running state can be in is drawn", (() => {
@@ -298,10 +372,14 @@ check("a paused washer keeps its bar but drops the strip", (() => {
   const t = laundryAt("pause", soon);
   return t && t.stages == null && t.progress != null;
 })());
-check("a finished washer lights every stage", (() => {
+/* The finished tile drops the strip: a completed cycle has no progress left
+   to show, and the row of ticks crowded out the dismissal hint. */
+check("a finished washer shows a full bar and no strip", (() => {
   const t = laundryAt("end");
-  return t && t.stage === STAGES.length && t.progress === 1;
+  return t && t.progress === 1 && t.stages == null;
 })());
+check("and says how to make it go away",
+      /tap/i.test(laundryAt("end").ctx), laundryAt("end").ctx);
 check("a state in no stage lights nothing rather than guessing",
       cycleAt("reserved", 20, 44).stage === null);
 
@@ -371,6 +449,71 @@ check("the surplus still charges the battery in that case",
       Math.abs(split(1.45, 0.624, 0.012, 0, 0.838, 0).sb - 0.838) < 1e-9);
 check("deliberate grid charging still reaches the battery",
       split(0, 0.4, 3.4, 0, 3.0, 0).gb === 3.0);
+
+console.log("\nearning a slot");
+/* The whole point of the rework: a tile appears when someone would act on it,
+   and is absent otherwise. These assert the absences, which is the half that
+   kept regressing. */
+/* `now` defaults to the real clock, because the door candidates measure
+   against last_changed and a synthetic now with real timestamps puts them
+   hours apart. Pass a fixed one only where the day part matters. */
+const withStates = (over, now) => {
+  const st = JSON.parse(JSON.stringify(hass.states));
+  for (const id in over) {
+    st[id] = Object.assign({ attributes: {} }, st[id],
+      typeof over[id] === "string" ? { state: over[id] } : over[id]);
+  }
+  return HC.contextCandidates({ states: st }, cconf, th, { now: now || new Date() });
+};
+const has = (pool, key) =>
+  pool.sticky.some((c) => c.key === key) || pool.ambient.some((c) => c.key === key);
+
+const shut = {};
+for (const o of roles.openings) {
+  shut[o.entity] = { state: "off", last_changed: new Date(2020, 0, 1).toISOString() };
+}
+check("a shut house shows no doors tile at all", !has(withStates(shut), "doors"));
+check("a shut house shows no just-shut tile once it is old news",
+      !has(withStates(shut), "doors_recent"));
+check("an open window takes a slot and holds it", (() => {
+  const o = Object.assign({}, shut);
+  o[roles.openings[1].entity] = { state: "on",
+    last_changed: new Date(Date.now() - 20 * 60000).toISOString() };
+  const p = withStates(o);
+  return p.sticky.some((c) => c.key === "doors");
+})());
+check("a door that just shut says so briefly", (() => {
+  const o = Object.assign({}, shut);
+  o[roles.openings[0].entity] = { state: "off",
+    last_changed: new Date(Date.now() - 60000).toISOString() };
+  return has(withStates(o), "doors_recent");
+})());
+check("and stops saying it after the window", (() => {
+  const o = Object.assign({}, shut);
+  o[roles.openings[0].entity] = { state: "off",
+    last_changed: new Date(Date.now() - 30 * 60000).toISOString() };
+  return !has(withStates(o), "doors_recent");
+})());
+check("a room one ppm over the line is not news", (() => {
+  const rm = roles.rooms.find((r) => r.co2);
+  const p = withStates({ [rm.co2]: String(Math.round(th.room_co2) + 1) });
+  return !p.ambient.some((c) => c.key === "air");
+})());
+check("a genuinely stuffy room is", (() => {
+  const rm = roles.rooms.find((r) => r.co2);
+  const over = {};
+  for (const r of roles.rooms) if (r.co2) over[r.co2] = "400";
+  over[rm.co2] = String(Math.round(th.room_co2 * 1.4));
+  const p = withStates(over);
+  return p.ambient.some((c) => c.key === "air");
+})());
+check("healthy batteries take no slot", !has(withStates({}), "batteries"));
+check("a flat phone does", (() => {
+  const p = withStates({ "sensor.kerans_iphone_battery_level": "11" });
+  return p.sticky.some((c) => c.key === "batteries");
+})());
+check("a coin cell at 11% still does not",
+      !has(withStates({ "sensor.hobeian_zg_204zv_battery": "11" }), "batteries"));
 
 console.log("\nslot filling");
 const pool = poolAt(12);

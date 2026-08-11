@@ -165,6 +165,59 @@
    * against each other; `weights` scores the ambient ones per day part.
    */
   const STICKY = {
+    /* Something is open. This is the only state of a door worth a permanent
+       tile -- "All closed" was on screen every hour of every day and told
+       nobody anything, which is the same fault the idle washing machine had.
+       A change is worth a moment's confirmation and then silence, so a
+       just-shut door gets a short-lived tile of its own below. */
+    doors(hass, config, th, ctx) {
+      const roles = HC.roles(config, "openings", hass) || [];
+      const live = roles.map((o) => ({ o, r: HC.read(hass, o.entity) }))
+                        .filter((x) => x.r.ok);
+      const open = live.filter((x) => x.r.on);
+      if (!open.length) return null;
+
+      const longest = open.map((x) => x.r)
+        .sort((a, b) => new Date(a.changed) - new Date(b.changed))[0];
+      return {
+        rank: 155, label: "Doors & windows", amber: true,
+        pill: open.length === 1 ? "OPEN" : `${open.length} OPEN`, tone: "warn",
+        state: open.length === 1 ? open[0].o.name : `${open.length} open`,
+        aside: HC.ago(longest.changed),
+        ctx: open.length === 1
+          ? `Open ${HC.ago(longest.changed)}`
+          : open.map((x) => x.o.name).join(" · "),
+        entity: open[0].o.entity
+      };
+    },
+
+    /* Only when someone would actually get up and do something. A phone at 30%
+       is not news; it gets plugged in tonight like every night. */
+    batteries(hass, config, th, ctx) {
+      const cfg = HC.roles(config, "batteries", hass);
+      const all = HC.discover.batteries(hass, cfg);
+      const needy = all.map((b) => ({ b, a: HC.batteryAction(b, th, cfg) }))
+                       .filter((x) => x.a.needs)
+                       .sort((x, y) => x.b.value - y.b.value);
+      if (!needy.length) return null;
+
+      const worst = needy[0];
+      const name = worst.b.name.replace(/ Battery( Level)?$/i, "");
+      const others = needy.length - 1;
+      return {
+        rank: worst.b.value < 5 ? 148 : 118,
+        label: "Batteries", pill: `${needy.length} NEED${needy.length === 1 ? "S" : ""} YOU`,
+        tone: worst.b.value < 5 ? "bad" : "warn",
+        amber: worst.b.value >= 5,
+        state: `${Math.round(worst.b.value)} %`,
+        aside: worst.a.verb === "charge" ? "plug in" : "new cell",
+        ctx: others
+          ? `${name} · and ${others} other${others === 1 ? "" : "s"}`
+          : `${name} · ${worst.a.verb === "charge" ? "wants charging" : "wants a new cell"}`,
+        entity: worst.b.id
+      };
+    },
+
     /* Bin night outranks everything else here: it is the only one with a
        deadline you cannot make up later. */
     bins(hass, config, th, ctx) {
@@ -250,17 +303,32 @@
              < Number(config.unload_window_hours || 3);
 
       if (has(cfg.finished_states, status.state) || recent) {
-        const done = HC.cycle(hass, cfg, status.state, null);
+        /* Dismissal, so the tile goes when the washing is actually dealt with
+           rather than when a timer says so -- the load can be hung out in ten
+           minutes or sit there for three hours, and only a person knows which.
+           It is stored on the box rather than in the browser so tapping it on
+           the kitchen tablet also clears it on everyone's phone.
+           HA's input_datetime state string is naive local time, so the epoch
+           `timestamp` attribute is the only safe way to read it. */
+        const ack = HC.read(hass, cfg.acknowledged);
+        const ackAt = ack.ok ? HC.num(ack.attrs.timestamp) : null;
+        if (at_ && !isNaN(at_) && ackAt != null && ackAt * 1000 >= at_.getTime()) {
+          return null;
+        }
+
+        /* No strip here, though every stage would light. A finished cycle has
+           no progress left to show, and the row of ticks was crowding out the
+           only thing this tile now needs to say: that tapping it makes it go
+           away. The strip earns its place while a wash is running. */
         return {
           rank: 140, label: "Laundry", pill: "UNLOAD ME", tone: "warn",
           amber: true, state: "Finished",
           aside: recent ? HC.ago(at_) : null,
-          ctx: recent ? `Cycle finished ${HC.ago(at_)}` : "Waiting to be emptied",
-          /* Every stage lit is the clearest way to say the cycle is over --
-             clearer than the word, and it is the same picture the machine's
-             own panel shows. */
-          stages: done.stages, stage: done.stages ? done.stages.length : null,
+          ctx: cfg.acknowledged
+            ? "Tap when it is hung out"
+            : (recent ? `Cycle finished ${HC.ago(at_)}` : "Waiting to be emptied"),
           progress: 1,
+          dismiss: cfg.acknowledged ? { entity: cfg.acknowledged } : null,
           entity: cfg.status
         };
       }
@@ -492,7 +560,12 @@
        read at all. */
     air(hass, config, th, ctx) {
       const worst = HC.worstAir(hass, config);
-      if (!worst || worst.ppm < th.room_co2 || worst.ppm >= th.room_co2_bad) return null;
+      /* A margin over the line, not the line itself. 801 ppm against an 800
+         line is true and worthless -- the same fault as "57 % lowest, nothing
+         under the 40% line". Fifteen percent over is where a closed room has
+         actually gone stuffy rather than merely crossed a number. */
+      if (!worst || worst.ppm < th.room_co2 * 1.15
+          || worst.ppm >= th.room_co2_bad) return null;
       return {
         weights: { night: .3, morning: .8, midday: .4,
                    afternoon: .4, evening: .6, late: .5 },
@@ -500,6 +573,32 @@
         state: HC.commas(worst.ppm) + " ppm",
         ctx: `${worst.title} · above the ${HC.commas(th.room_co2)} ppm line`,
         entity: worst.entity
+      };
+    },
+
+    /* "The garage just shut" is worth a moment and then nothing. This is the
+       confirmation half of the door story: it appears for a few minutes after
+       something closes and then stops, rather than sitting on SECURE forever.
+       High weight everywhere, because when it is true it is the newest thing
+       on the page and it is about to stop being true. */
+    doors_recent(hass, config, th, ctx) {
+      const roles = HC.roles(config, "openings", hass) || [];
+      const live = roles.map((o) => ({ o, r: HC.read(hass, o.entity) }))
+                        .filter((x) => x.r.ok);
+      if (!live.length || live.some((x) => x.r.on)) return null;   // open is sticky's job
+
+      const last = live.sort((a, b) =>
+        new Date(b.r.changed) - new Date(a.r.changed))[0];
+      const mins = (ctx.now.getTime() - new Date(last.r.changed).getTime()) / 60000;
+      const window_ = Number(config.door_recent_minutes || 5);
+      if (!isFinite(mins) || mins < 0 || mins > window_) return null;
+
+      return {
+        weights: { night: 1, morning: 1, midday: 1, afternoon: 1, evening: 1, late: 1 },
+        label: "Doors & windows", pill: "JUST SHUT", tone: "good",
+        state: "All closed",
+        ctx: `${last.o.name} closed ${HC.ago(last.r.changed)}`,
+        entity: last.o.entity
       };
     },
 

@@ -80,7 +80,7 @@
       if (charging) { tone = "good"; accent = "var(--hc-green)"; label = "CHARGING"; }
       else if (discharging) {
         label = "DISCHARGING";
-        if (pct < (this._th.battery_low || 40)) {
+        if (pct < this._th.house_battery_low) {
           tone = "warn"; accent = "var(--hc-amber)";
         } else { tone = "good"; accent = "var(--hc-green)"; }
       }

@@ -41,9 +41,25 @@
     house: {}
   };
 
+  /* Batteries get two action lines, not one, because there are two different
+     jobs behind the number. A phone at 30% is fine -- it gets plugged in
+     tonight like every night, and nobody wants to be told. A door sensor at
+     30% is also fine, and will be for months. What is worth saying is "this
+     needs plugging in NOW" and "this cell is about to die", and those are
+     nowhere near the same percentage.
+
+     One shared line at 40% is what produced "57 % lowest · nothing under the
+     40% line" -- a tile that is technically true, permanently on screen, and
+     of no use to anyone. */
   HC.THRESHOLDS = {
-    battery_low:  { default: 40,    unit: "%",     helper: null },
+    battery_recharge: { default: 20, unit: "%", helper: null },   // plug it in
+    battery_replace:  { default: 5,  unit: "%", helper: null },   // swap the cell
     battery_show: { default: 80,    unit: "%",     helper: null },
+    /* The house battery's state of charge is a different quantity from a
+       device's, and shared the old `battery_low` only by an accident of
+       naming: one is "the pack is running down tonight", the other is "go and
+       find a AAA". */
+    house_battery_low: { default: 20, unit: "%", helper: null },
     room_humid:   { default: 75,    unit: "%",     helper: null },
     room_co2:     { default: 800,   unit: "ppm",   helper: null },
     room_co2_bad: { default: 1600,  unit: "ppm",   helper: null },

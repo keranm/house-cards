@@ -2,24 +2,28 @@
   /* ------------------------------------------------------------------ *
    * hc-attention
    * ------------------------------------------------------------------ *
-   * The row you read before you walk out of the room.
+   * The row you read before you walk out of the room. Four slots, none of them
+   * reserved: every tile is a candidate from HC.contextCandidates, and each has
+   * to earn its place every fifteen seconds.
    *
-   * Two of its four tiles are fixed, because two questions are always worth
-   * asking: is the house shut, is anything flat. The middle two are a stage.
-   * What stands on it comes from HC.contextCandidates -- a live fact if there
-   * is one (bins tonight, washer running, air gone off), and otherwise
-   * something the hour makes worth knowing, rotating on a timer.
+   * Nothing is pinned because everything that was pinned went stale. Laundry
+   * read "Off · last cycle finished 2 days ago" nine days in ten. Bins sat
+   * amber telling you to put them out for eleven hours after the truck had
+   * been. "All closed" was true every hour of every day. "57 % lowest ·
+   * nothing under the 40% line" is a sentence nobody has ever acted on. Each
+   * was honest, permanently on screen, and worth nothing.
    *
-   * This replaced a fixed Bins + Laundry pair. The laundry tile read "Off ·
-   * last cycle finished 2 days ago" roughly nine days in ten, and the bin tile
-   * sat amber telling you to put the bins out for eleven hours after the truck
-   * had already been. Both were honest and neither was worth a quarter of the
-   * row.
+   * So the rule is: a tile appears when a person would do something about it,
+   * or when the hour makes it worth knowing, and it leaves when it stops being
+   * either. A door tile means a door is open. A battery tile means something
+   * wants charging now. When the house has nothing to say, the slots fill with
+   * things worth knowing anyway -- the weather, how much daylight is left, what
+   * power costs right now.
    *
-   * The battery tile stays here rather than deferring to the Batteries section
-   * downstream, and both read `battery_low` from HC.thresholds -- an early
-   * draft had this row calling a device green while that section called the
-   * same device red.
+   * Batteries answer to two action lines rather than one, both from
+   * HC.thresholds, and the Batteries section downstream reads the same pair --
+   * an early draft had this row calling a device green while that section
+   * called it red.
    */
 
   const ATT_CSS = `
@@ -85,10 +89,15 @@
   @media (max-width: 520px) { .tiles { grid-template-columns: 1fr; } }
   `;
 
-  /* "context" is a slot rather than a tile: it is filled from the candidate
-     pool at render time and may hold a different subject on every rotation. */
+  /* Every slot is now a stage. Doors and batteries used to be nailed down
+     either end of the row, and both spent almost all of their time saying
+     nothing: "All closed" is true every hour of every day, and "57 % lowest ·
+     nothing under the 40% line" is a fact nobody has ever acted on. They are
+     candidates now, and they earn a slot only when a person would do something
+     about them. `tiles` still accepts the old fixed names for anyone who wants
+     one pinned. */
   const SLOT_KEYS = ["doors", "context", "batteries"];
-  const DEFAULT_SLOTS = ["doors", "context", "context", "batteries"];
+  const DEFAULT_SLOTS = ["context", "context", "context", "context"];
 
   class Attention extends HC.Card {
     constructor() {
@@ -236,7 +245,15 @@
         void tile.t.offsetWidth;
         tile.t.classList.add("swap");
       }
-      tile.t.onclick = spec.entity ? () => this.moreInfo(spec.entity) : null;
+      /* A tile that can be dismissed is dismissed by tapping it. Anything else
+         opens the entity behind it, so every number on the page is still a way
+         in to what produced it. */
+      if (spec.dismiss) {
+        tile.t.onclick = () => this._dismiss(spec.dismiss);
+        tile.t.style.cursor = "pointer";
+      } else {
+        tile.t.onclick = spec.entity ? () => this.moreInfo(spec.entity) : null;
+      }
     }
 
     update() {
@@ -246,14 +263,11 @@
         forecast: this._forecast,
         weatherEntity: this._weatherEntity
       });
-      const wanted = this._tiles.filter((t) => t.slot === "context").length;
-      const picks = HC.fillSlots(pool, wanted, this._tick);
+      const picks = HC.fillSlots(pool, this._tiles.length, this._tick);
 
       let i = 0;
       for (const tile of this._tiles) {
-        if (tile.slot === "doors") this._set(tile, this._doors());
-        else if (tile.slot === "batteries") this._set(tile, this._batteries());
-        else this._set(tile, this._contextTile(picks[i++]));
+        this._set(tile, this._contextTile(picks[i++]));
       }
       /* First paint should not fade -- the row already has its entry
          animation, and running both makes the tiles arrive twice. */
@@ -294,6 +308,20 @@
       });
     }
 
+    /* Stamp "dealt with" on the box rather than in this browser, so clearing
+       it on the kitchen tablet also clears it on everyone's phone. */
+    _dismiss(d) {
+      if (!d || !d.entity) return;
+      const now = new Date();
+      const pad = (n) => String(n).padStart(2, "0");
+      this.callService("input_datetime", "set_datetime", {
+        entity_id: d.entity,
+        /* HA wants naive local time here, and reads it back the same way. */
+        datetime: `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} `
+                + `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`
+      });
+    }
+
     /* A candidate, or the honest version of an empty stage. */
     _contextTile(pick) {
       if (!pick) {
@@ -302,66 +330,6 @@
                  ctx: "No bins, no washing, nothing to chase" };
       }
       return Object.assign({ subject: pick.key }, pick);
-    }
-
-    /* ---- doors & windows ------------------------------------------- */
-    _doors() {
-      const roles = HC.roles(this._config, "openings", this.hass);
-      const reads = roles.map((o) => ({ o, r: HC.read(this.hass, o.entity) }));
-      const live = reads.filter((x) => x.r.ok);
-      const open = live.filter((x) => x.r.on);
-
-      if (!live.length) {
-        return { subject: "doors-gap", label: "Doors & windows", pill: "GAP",
-                 tone: "idle", state: "No data",
-                 ctx: "No contact sensors reporting" };
-      }
-
-      const last = live.map((x) => x.r)
-        .sort((a, b) => new Date(b.changed) - new Date(a.changed))[0];
-
-      if (open.length) {
-        return {
-          subject: "doors-open", label: "Doors & windows",
-          pill: `${open.length} OPEN`, tone: "warn", amber: true,
-          state: open.length === 1 ? open[0].o.name : `${open.length} open`,
-          ctx: open.map((x) => x.o.name).join(" · "),
-          entity: open[0].o.entity
-        };
-      }
-      return {
-        subject: "doors-shut", label: "Doors & windows", pill: "SECURE",
-        tone: "good", state: "All closed",
-        ctx: `${live.length} sensors · ${last.name.replace(/( Sensor)?( Door| Contact)?$/i, "")} closed ${HC.ago(last.changed)}`,
-        entity: live[0].o.entity
-      };
-    }
-
-    /* ---- batteries --------------------------------------------------- */
-    _batteries() {
-      const cfg = HC.roles(this._config, "batteries", this.hass);
-      const all = HC.discover.batteries(this.hass, cfg);
-      const low = this._th.battery_low;
-
-      if (!all.length) {
-        return { subject: "bat-gap", label: "Batteries", pill: "GAP",
-                 tone: "idle", state: "No data",
-                 ctx: "No battery sensors found" };
-      }
-
-      const under = all.filter((b) => b.value < low);
-      const lowest = all[0];
-      const shortName = (n) => n.replace(/ Battery( Level)?$/i, "");
-
-      return under.length
-        ? { subject: "bat-low", label: "Batteries", pill: `${under.length} LOW`,
-            tone: "bad", state: `${Math.round(lowest.value)} % lowest`,
-            ctx: `${shortName(lowest.name)} · ${under.length} under the ${low}% line`,
-            entity: lowest.id }
-        : { subject: "bat-ok", label: "Batteries", pill: "NONE LOW",
-            tone: "good", state: `${Math.round(lowest.value)} % lowest`,
-            ctx: `${shortName(lowest.name)} · nothing under the ${low}% line`,
-            entity: lowest.id };
     }
 
     getCardSize() { return 3; }
