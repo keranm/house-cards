@@ -27,7 +27,8 @@ except ImportError:
     print("note: ../../alerts not importable -- the ticker will preview empty")
 
 named = set(re.findall(
-    r'"((?:sensor|binary_sensor|input_number|input_boolean|input_text|light|'
+    r'"((?:sensor|binary_sensor|input_number|input_boolean|input_text|'
+    r'input_select|input_datetime|light|cover|'
     r'switch|person|sun|climate|number|event|calendar|todo|vacuum|weather|'
     r'camera|select|siren|alarm_control_panel)\.[a-z0-9_]+)"',
     json.dumps(house)))

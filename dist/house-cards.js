@@ -467,6 +467,11 @@
     context: {},
     batteries: { discover: true, exclude_prefixes: [], exclude: [] },
     lights: { discover: true, exclude: [] },
+    /* Not discovered. Which cover is a blind rather than a curtain, awning or
+       garage door is a judgement, and so is which light meter sits in the same
+       room as it -- see the note at the top about what this file will and will
+       not guess. */
+    blinds: [],
     house: {}
   };
 
@@ -493,7 +498,18 @@
     room_co2:     { default: 800,   unit: "ppm",   helper: null },
     room_co2_bad: { default: 1600,  unit: "ppm",   helper: null },
     room_cool:    { default: 18,    unit: "C",     helper: null },
-    step_goal:    { default: 10000, unit: "steps", helper: null }
+    step_goal:    { default: 10000, unit: "steps", helper: null },
+    /* Soil moisture, as a capacitive probe reports it. Two lines rather than
+       one because they answer different questions: below `soil_dry` the bed
+       wants water, above `soil_wet` watering it does harm, and the whole point
+       of the middle is that it needs no decision at all.
+
+       These are the general figures for garden soil, not measurements from any
+       particular bed. Where the probe carries its own warning level, point
+       `soil_dry` at that number instead -- then the card and the device cannot
+       call the same reading dry and normal. */
+    soil_dry:     { default: 20,    unit: "%",     helper: null },
+    soil_wet:     { default: 55,    unit: "%",     helper: null }
   };
 
   /* The frontend carries the registries on `hass` -- hass.entities,
@@ -1649,6 +1665,190 @@
   };
 
   /* ------------------------------------------------------------------ *
+   * Should you water?
+   * ------------------------------------------------------------------ *
+   *
+   * Out here rather than inside hc-soil so the offline harness can run it
+   * against a real state dump, which is where the bugs that matter live: an
+   * off-by-one on a threshold renders perfectly and tells you the wrong thing.
+   *
+   * TWO INPUTS, NOT ONE. Moisture alone would have the card telling you to
+   * water a dry bed on the morning of a storm. The rain figures are the same
+   * `input_number.garden_rain_next_*` helpers hc-taps reads and the garden
+   * automations act on, so all three agree about what the sky is going to do.
+   *
+   * The precedence is: a wet bed needs nothing whatever the forecast says, and
+   * a dry bed's answer is decided by the rain. That ordering is why this is a
+   * function and not a table -- 24 h rain outranks 48 h rain, and both outrank
+   * "it is dry", but none of them outrank "it is already wet".
+   */
+
+  HC.soilVerdict = (moisture, th, rain24, rain48) => {
+    const dry = th.soil_dry, wet = th.soil_wet;
+    const a = rain24 || 0, b = rain48 || 0;
+    const rainKnown = rain24 != null || rain48 != null;
+    const rainNote = !rainKnown
+      ? "No rain forecast available."
+      : `${HC.dec(a, 1)} mm due in 24 h, ${HC.dec(b, 1)} mm in 48 h.`;
+
+    /* Absent is a designed state. A verdict guessed from the forecast alone,
+       with no probe reading behind it, is the card inventing the number it was
+       put there to report. */
+    if (moisture == null) {
+      return {
+        tone: "idle",
+        water: null,
+        verdict: "No reading from the probe.",
+        why: "The moisture sensor is not reporting, so this cannot tell you "
+           + "whether the bed needs water. Check it by hand."
+      };
+    }
+
+    const level = `${Math.round(moisture)}% moisture`;
+
+    if (moisture >= wet) {
+      return {
+        tone: "cool",
+        water: false,
+        verdict: "Leave it — the soil is wet.",
+        why: `${level}, above the ${wet}% line. Watering now risks waterlogging `
+           + `the roots. ${rainNote}`
+      };
+    }
+
+    if (moisture >= dry) {
+      return {
+        tone: "good",
+        water: false,
+        verdict: "No need to water.",
+        why: `${level}, comfortably between the ${dry}% dry line and the ${wet}% `
+           + `wet line. ${rainNote}`
+      };
+    }
+
+    /* Dry. What to do about it is the forecast's call. 5 mm is the figure
+       hc-taps already treats as a real soaking; below 2 mm is not worth
+       counting on. */
+    if (a >= 5) {
+      return {
+        tone: "cool",
+        water: false,
+        verdict: "Dry — but hold off, rain is coming.",
+        why: `${level}, under the ${dry}% line. A good soaking is due within the `
+           + "day, so watering now is water down the drain."
+      };
+    }
+    if (a >= 2) {
+      return {
+        tone: "warn",
+        water: "light",
+        verdict: "Dry — a short run at most.",
+        why: `${level}, under the ${dry}% line, with a little rain due. Enough to `
+           + "top it up rather than a full cycle."
+      };
+    }
+    if (b >= 5) {
+      return {
+        tone: "warn",
+        water: "light",
+        verdict: "Dry — water lightly, more rain due tomorrow.",
+        why: `${level}, under the ${dry}% line. Nothing useful today but a soaking `
+           + "within two days, so this only has to last until then."
+      };
+    }
+    return {
+      tone: "bad",
+      water: true,
+      verdict: "Water today.",
+      why: `${level}, under the ${dry}% line, and no useful rain in the next two `
+         + "days. Nothing else is going to do this."
+    };
+  };
+
+  /* ------------------------------------------------------------------ *
+   * What we believe about a blind, and what the room suggests
+   * ------------------------------------------------------------------ *
+   *
+   * Out here rather than inside hc-blinds so the harness can run both against
+   * a real state dump. The belief rules in particular are the sort of thing
+   * that looks obviously right and is quietly wrong for a week.
+   *
+   * The two are kept apart on purpose. `blindBelief` is what the house has
+   * been told; `blindEvidence` is what a light meter implies. They are allowed
+   * to disagree, and the card's job when they do is to say so and ask, not to
+   * pick a winner. Merging them into one "state" here is exactly the mistake
+   * this whole arrangement exists to avoid.
+   */
+
+  HC.BLIND_UP = "Up";
+  HC.BLIND_DOWN = "Down";
+  HC.BLIND_UNKNOWN = "Unknown";
+
+  /* Fraction of the outdoor reading a room passes through. See
+     src/cards/28-blinds.js for why this is a ratio and not a lux threshold,
+     and blinds/blinds_def.py for the calibration status of these two numbers
+     (estimated, not measured). */
+  HC.BLIND_RATIOS = { open: 0.06, shut: 0.015, min_elevation: 8 };
+
+  /* Where our answer comes from, and how much it is worth.
+
+     The input_select is preferred over the cover entity even though the cover
+     is the "real" entity, because the cover's state is Bond's memory of a
+     command and cannot be corrected: a person who has just looked at the blind
+     has nowhere to put that knowledge except the helper. An instance with no
+     helper still works, and gets told the answer is a guess. */
+  HC.blindBelief = (hass, blind) => {
+    const bel = HC.read(hass, blind.belief);
+    const cov = HC.read(hass, blind.cover);
+    const known = [HC.BLIND_UP, HC.BLIND_DOWN, HC.BLIND_UNKNOWN];
+
+    if (bel.ok && known.indexOf(bel.state) >= 0) {
+      return { belief: bel.state, source: "belief", at: bel.changed, reachable: cov.ok };
+    }
+    if (cov.ok) {
+      /* A cover with no position reports open/closed, and anything else --
+         opening, closing, a stop part way -- is not a resting place. */
+      const belief = cov.state === "closed" ? HC.BLIND_DOWN
+        : cov.state === "open" ? HC.BLIND_UP
+        : HC.BLIND_UNKNOWN;
+      return { belief, source: "cover", at: cov.changed, reachable: true };
+    }
+    return { belief: HC.BLIND_UNKNOWN, source: "none", at: null, reachable: false };
+  };
+
+  /* What the room's light says, or null when it says nothing worth hearing.
+
+     Null is returned rather than a third verdict because "the sun is down" and
+     "the room is halfway" are not evidence of anything, and a caller that has
+     to distinguish them from a real reading will get it wrong. Everything that
+     disqualifies a read is checked here:
+
+       - the sun too low to deliver a usable difference
+       - either meter absent or unavailable (a dead meter reads as darkness,
+         which is the shut answer, which is the worst possible failure)
+       - an outdoor reading small enough to make the ratio meaningless
+  */
+  HC.blindEvidence = (hass, blind, sunEntity, ratios) => {
+    const R = Object.assign({}, HC.BLIND_RATIOS, ratios || {});
+
+    const sun = HC.read(hass, sunEntity);
+    const elev = HC.num((sun.attrs || {}).elevation);
+    if (elev == null || elev < R.min_elevation) return null;
+
+    const room = HC.read(hass, blind.lux);
+    if (!room.ok || room.value == null) return null;
+
+    const out = HC.read(hass, blind.outside_lux);
+    if (!out.ok || out.value == null || out.value < 50) return null;
+
+    const ratio = room.value / out.value;
+    const verdict = ratio >= R.open ? HC.BLIND_UP
+      : ratio <= R.shut ? HC.BLIND_DOWN
+      : null;
+    return { verdict, ratio, room: room.value, outside: out.value, elevation: elev };
+  };
+
+  /* ------------------------------------------------------------------ *
    * hc-layout
    * ------------------------------------------------------------------ *
    * The page container. Takes rows of cards and lays them out in the grid the
@@ -1738,16 +1938,40 @@
       this._children = [];
       this._slots = [];
 
+      this._rows = [];
+
       cfg.rows.forEach((row) => {
         const cards = row.cards || [];
         const el = HC.el("div", "lrow");
         el.style.gridTemplateColumns = row.columns || `repeat(${cards.length}, minmax(0, 1fr))`;
+        const slots = [];
         cards.forEach((childCfg) => {
           const slot = HC.el("div", "lcol");
           HC.add(el, slot);
-          this._slots.push({ slot, config: childCfg });
+          const entry = { slot, config: childCfg, hidden: false };
+          slots.push(entry);
+          this._slots.push(entry);
         });
+        this._rows.push({ el, slots });
         HC.add(page, el);
+      });
+
+      /* A card that has nothing to say can hide itself, and the row it was in
+         has to close up behind it or the page keeps a 16px gap for something
+         that is not there -- which is exactly the ragged look the container was
+         written to avoid. The ticker is the case that needs this: it is absent
+         on any day nothing is wrong, which is most days.
+         An event rather than measuring heights, because `update()` runs on
+         every state change in the house and reading offsetHeight there would
+         force a reflow several times a second. */
+      page.addEventListener("hc-visibility", (e) => {
+        const entry = this._slots.find((s) => s.slot.contains(e.target));
+        if (!entry) return;
+        entry.hidden = !(e.detail && e.detail.visible);
+        for (const r of this._rows) {
+          if (r.slots.indexOf(entry) < 0) continue;
+          r.el.style.display = r.slots.every((s) => s.hidden) ? "none" : "";
+        }
       });
 
       /* Card helpers load asynchronously, so children arrive a tick after the
@@ -5449,6 +5673,1067 @@
   HC.define("hc-vitals", Vitals, {
     name: "Host vitals",
     description: "Disk, memory, CPU, temperature and pressure with one verdict.",
+    preview: true
+  });
+
+  /* ------------------------------------------------------------------ *
+   * hc-ticker
+   * ------------------------------------------------------------------ *
+   * The strip across the top of the page that says what is wrong.
+   *
+   * It reads the SAME alert list the AlertTicker card reads -- the one
+   * generated from alerts/alerts_def.py and handed to this card as `alerts:`.
+   * That is deliberate and it is the whole point: alerts are defined once, one
+   * repo over, and both tickers are renderers of that one definition. Nothing
+   * here decides what an alert is.
+   *
+   * Why a second renderer at all. The AlertTicker is a fine card and it keeps
+   * the old Summary view. But its fifty themes are all dark neon gradients
+   * chosen for a different kind of dashboard, it exposes no colour or layout
+   * config, and card_mod could only ever recolour it -- the design here is a
+   * different structure, not a different palette. So this page renders the same
+   * alerts in the page's own language: a 56px bar in the kit's tokens, which
+   * means it follows HA into dark mode along with everything else.
+   *
+   * The matching rules below mirror the AlertTicker's exactly, including the
+   * parts that are arguably odd (a `device_class` sweep walks every domain, not
+   * just the obvious one). Matching upstream is worth more than being right in
+   * isolation: the two cards are looking at the same house, and a fact that
+   * appears on one view and not the other is worse than a fact that appears on
+   * neither.
+   *
+   * Not carried over: snooze, alert history, sound, grouping, the visual
+   * editor. This page wants the top three lines of that card and none of the
+   * rest -- the ticker is a strip you read on the way past, and everything it
+   * raises is already on somebody's phone.
+   */
+
+  const TICK_CSS = `
+  /* 56px is a floor rather than a height: a long alert body on a narrow tablet
+     wraps, and a bar that clipped it would be hiding the only thing it exists
+     to say. */
+  .tick {
+    display: flex; align-items: center; min-height: 56px;
+    padding: 8px 18px; border-radius: var(--hc-r-card);
+    background: var(--hc-amber-tint); border: 1px solid var(--hc-amber-border);
+    cursor: pointer;
+  }
+  .tick .lead { display: flex; align-items: center; gap: 9px; flex: none; }
+  .tick .count {
+    font-family: var(--hc-mono); font-size: 11px; font-weight: 500;
+    letter-spacing: .14em; text-transform: uppercase; color: var(--hc-amber-deep);
+    white-space: nowrap;
+  }
+  /* A rule rather than a gap: the count is a different kind of thing from the
+     message and the eye needs telling. */
+  .tick .rule { width: 1px; align-self: stretch; margin: 0 16px;
+                background: var(--hc-amber-border); flex: none; }
+
+  .tick .msg { flex: 1; min-width: 0; display: flex; align-items: baseline;
+               gap: 8px; flex-wrap: wrap; }
+  .tick .t { font-size: 15px; font-weight: 600; color: var(--hc-amber-ink); }
+  /* The body is what goes when there is not room. The title carries the alert;
+     the body is the detail, and a truncated detail still points at the right
+     thing. */
+  .tick .b { font-size: 14px; color: var(--hc-amber-body); min-width: 0;
+             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .tick .tail { display: flex; align-items: center; gap: 14px; flex: none;
+                margin-left: 16px; }
+  .tick .pages { display: flex; gap: 6px; }
+  .tick .pg { width: 6px; height: 6px; border-radius: 50%; flex: none;
+              background: var(--hc-amber-border); }
+  .tick .pg.on { background: var(--hc-amber); }
+  .tick .of { font-family: var(--hc-mono); font-size: 11px; letter-spacing: .1em;
+              color: var(--hc-amber-deep); }
+  .tick .dismiss {
+    font-family: var(--hc-mono); font-size: 11px; font-weight: 500;
+    letter-spacing: .14em; text-transform: uppercase; color: var(--hc-amber-deep);
+    background: none; border: 0; padding: 4px 2px; cursor: pointer;
+  }
+  .tick .dismiss:hover { color: var(--hc-amber-ink); }
+
+  /* Priority is the one thing on this bar that must not be a house style.
+     P1 is a leak or carbon monoxide and does not get to look like a shopping
+     reminder; P3 is the mail and does not get to look like an emergency. The
+     amber bar the design specifies is the middle band, which is where most
+     alerts live. */
+  .tick.p1 { background: var(--hc-red-tint); border-color: var(--hc-red-border); }
+  .tick.p1 .count, .tick.p1 .of, .tick.p1 .dismiss { color: var(--hc-red-ink); }
+  .tick.p1 .rule { background: var(--hc-red-border); }
+  .tick.p1 .t { color: var(--hc-red-ink); }
+  .tick.p1 .b { color: var(--hc-ink-2); }
+  .tick.p1 .pg { background: var(--hc-red-border); }
+  .tick.p1 .pg.on { background: var(--hc-red); }
+
+  .tick.p3 { background: var(--hc-blue-tint); border-color: var(--hc-border); }
+  .tick.p3 .count, .tick.p3 .of, .tick.p3 .dismiss { color: var(--hc-blue-ink); }
+  .tick.p3 .rule { background: var(--hc-border); }
+  .tick.p3 .t { color: var(--hc-blue-ink); }
+  .tick.p3 .b { color: var(--hc-ink-2); }
+  .tick.p3 .pg { background: var(--hc-border); }
+  .tick.p3 .pg.on { background: var(--hc-blue); }
+
+  /* Only the swap fades. Running this on every hass update would strobe the
+     bar in a busy house, which is the same fault the attention row had. */
+  .tick.swap .msg { animation: hcFade .35s ease both; }
+  @keyframes hcFade { from { opacity: 0; } to { opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) { .tick.swap .msg { animation: none; } }
+
+  /* On a phone the count and the page dots are the first things to go: which
+     alert of how many is a detail, and the alert itself is not. */
+  @media (max-width: 640px) {
+    .tick { padding: 10px 14px; }
+    .tick .rule, .tick .pages, .tick .of { display: none; }
+    .tick .lead { margin-right: 10px; }
+    .tick .count { display: none; }
+  }
+  `;
+
+  /* ---- matching ------------------------------------------------------ *
+   * A faithful port of the AlertTicker's rules. Kept together here so the
+   * comparison against that card is a single file to read.
+   */
+
+  const TICK_EQ = {
+    "=":  (v, t) => v === t,
+    "==": (v, t) => v === t,
+    "!=": (v, t) => v !== t,
+    contains:     (v, t) => v.toLowerCase().indexOf(t.toLowerCase()) >= 0,
+    not_contains: (v, t) => v.toLowerCase().indexOf(t.toLowerCase()) < 0
+  };
+
+  const TICK_CMP = {
+    ">":  (a, b) => a > b,
+    "<":  (a, b) => a < b,
+    ">=": (a, b) => a >= b,
+    "<=": (a, b) => a <= b
+  };
+
+  /* `rule` is either an alert or one of its `conditions` -- both carry the same
+     `state` / `operator` pair, which is why conditions can be checked with the
+     same function as the alert itself. */
+  const tickMatches = (value, rule) => {
+    if (rule.state == null || rule.state === "") return true;
+    if (Array.isArray(rule.state)) return rule.state.map(String).indexOf(value) >= 0;
+
+    const op = rule.operator || "=";
+    const target = String(rule.state);
+    if (TICK_EQ[op]) return TICK_EQ[op](value, target);
+
+    /* A non-numeric state against a numeric operator is a no, not a crash: the
+       battery sweep runs `< 20` across every battery in the house and some of
+       them are binary sensors reading "off". */
+    const a = parseFloat(value);
+    const b = parseFloat(target);
+    if (!isFinite(a) || !isFinite(b)) return false;
+    return TICK_CMP[op] ? TICK_CMP[op](a, b) : false;
+  };
+
+  /* `*co_alarm_detected*` is a glob; a filter with no star is a substring.
+     Both are matched against the entity id AND the friendly name, because the
+     alert set uses whichever of the two is stable for that integration. */
+  const tickMatcher = (filter) => {
+    const f = String(filter).toLowerCase();
+    if (f.indexOf("*") >= 0) {
+      const pattern = f.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+      const re = new RegExp("^" + pattern + "$");
+      return (text) => re.test(String(text).toLowerCase());
+    }
+    return (text) => String(text).toLowerCase().indexOf(f) >= 0;
+  };
+
+  /* One alert definition may describe many alerts -- "any moisture sensor that
+     is on" is one line of config and nine entities. Expanding first means
+     everything downstream deals in concrete alerts with a real entity. */
+  const tickExpand = (hass, alerts) => {
+    const out = [];
+    (alerts || []).forEach((alert, idx) => {
+      const sweeps = !alert.entity && (alert.entity_filter || alert.device_class);
+      if (!sweeps) { out.push(Object.assign({ _idx: idx }, alert)); return; }
+
+      const match = alert.entity_filter ? tickMatcher(alert.entity_filter) : null;
+      const excluded = alert.entity_filter_exclude || alert.device_class_exclude || [];
+      for (const id in hass.states) {
+        if (excluded.indexOf(id) >= 0) continue;
+        const s = hass.states[id];
+        const attrs = s.attributes || {};
+        if (alert.device_class && attrs.device_class !== alert.device_class) continue;
+        if (match && !match(id) && !match(attrs.friendly_name || "")) continue;
+
+        const name = attrs.friendly_name || id;
+        out.push(Object.assign({}, alert, {
+          _idx: idx,
+          entity: id,
+          message: String(alert.message || "")
+            .replace(/\{entity\}/g, id)
+            .replace(/\{name\}/g, name)
+            .replace(/\{state\}/g, s.state)
+        }));
+      }
+    });
+    return out;
+  };
+
+  /* Every alert message splits into a title and a body at the first em dash.
+     The alert set was written that way already -- "💧 Water leak — Kitchen",
+     "🖴 Pi disk 94% full — time to purge recorder history" -- so the design's
+     bold-title-plus-body line falls out of the copy rather than needing a
+     second field nobody would remember to fill in. A message with no dash is
+     all title, which is right: "📬 Mail has arrived" has no detail to give. */
+  const tickSplit = (message) => {
+    const s = String(message == null ? "" : message);
+    const i = s.indexOf(" — ");
+    return i < 0 ? { title: s.trim(), body: "" }
+                 : { title: s.slice(0, i).trim(), body: s.slice(i + 3).trim() };
+  };
+
+  /* Which alerts are true right now, worst first. Pulled out of the card as a
+     plain function of (state, definitions, clock) because this is the half that
+     can be wrong in ways nobody notices -- an operator that silently never
+     matches shows up as a ticker that is simply always quiet -- and a pure
+     function is the half tools/test_logic.js can run against a real state dump
+     with no DOM. */
+  const tickActive = (hass, alerts, now) => {
+    now = now || Date.now();
+    const out = [];
+
+    for (const alert of tickExpand(hass, alerts)) {
+      const state = hass.states[alert.entity];
+      if (!state) continue;
+      if (!tickMatches(state.state, alert)) continue;
+
+      const conds = Array.isArray(alert.conditions) ? alert.conditions
+        : (alert.conditions && alert.conditions.entity ? [alert.conditions] : []);
+
+      if (conds.length) {
+        const results = conds.map((cond) => {
+          /* `{entity}` points a condition back at whichever entity the sweep
+             expanded to -- how the garden valve alert says "abnormal, and not
+             merely offline" about each valve in turn. */
+          const id = (cond.entity === "{entity}" || cond.entity === "this.entity_id")
+            ? alert.entity : cond.entity;
+          const s = id ? hass.states[id] : null;
+          return s ? tickMatches(s.state, cond) : false;
+        });
+        const ok = (alert.conditions_logic || "and") === "or"
+          ? results.some(Boolean) : results.every(Boolean);
+        if (!ok) continue;
+      }
+
+      /* The delay is measured, not timed. The garage alert wants ten minutes of
+         "still open", and reading that off last_changed means it is already
+         correct the instant the page loads -- a timer started at render would
+         restart the ten minutes every time somebody walked past the tablet.
+         Latest change across the primary and its conditions, so the clock
+         starts from when they were all true together. */
+      if (alert.trigger_delay) {
+        let since = state.last_changed ? new Date(state.last_changed).getTime() : 0;
+        for (const cond of conds) {
+          const s = cond.entity ? hass.states[cond.entity] : null;
+          if (!s || !s.last_changed) continue;
+          const t = new Date(s.last_changed).getTime();
+          if (t > since) since = t;
+        }
+        if (!since || (now - since) / 1000 < Number(alert.trigger_delay)) continue;
+      }
+
+      out.push(alert);
+    }
+
+    /* Priority first, then the order they were defined in, so the bar does not
+       reshuffle itself between two equally urgent alerts on every tick. */
+    out.sort((a, b) =>
+      (Number(a.priority) || 3) - (Number(b.priority) || 3) || a._idx - b._idx);
+    return out;
+  };
+
+  /* Reachable from the offline tests, which run the shipped bundle rather than
+     src/ and so cannot see anything module-local. */
+  HC.ticker = { active: tickActive, matches: tickMatches,
+                expand: tickExpand, split: tickSplit };
+
+  class Ticker extends HC.Card {
+    constructor() {
+      super();
+      this._i = 0;
+      this._timer = null;
+      this._dismissed = {};
+      /* Rendered Jinja, keyed by the template that produced it, plus the
+         subscriptions holding them open. `input_text.wind_alert_message` is
+         interpolated into the wind alert's message and HA is the only thing
+         that can render it. */
+      this._tmpl = {};
+      this._tmplSub = {};
+      this._visible = null;
+    }
+
+    build() {
+      const style = HC.el("style");
+      style.textContent = TICK_CSS;
+
+      const bar = HC.el("div", "tick");
+
+      const lead = HC.el("div", "lead");
+      const dot = HC.dot("var(--hc-amber)", true);
+      const count = HC.el("span", "count");
+      HC.add(lead, dot, count);
+
+      const rule = HC.el("div", "rule");
+
+      const msg = HC.el("div", "msg");
+      const title = HC.el("span", "t");
+      const body = HC.el("span", "b");
+      HC.add(msg, title, body);
+
+      const tail = HC.el("div", "tail");
+      const pages = HC.el("div", "pages");
+      const of = HC.el("span", "of");
+      const dismiss = HC.el("button", "dismiss", "Dismiss");
+      dismiss.type = "button";
+      HC.add(tail, pages, of, dismiss);
+
+      HC.add(bar, lead, rule, msg, tail);
+
+      /* Tapping the bar runs the alert's own action -- turning the mail flag
+         off, opening the garage switch, jumping to the Pi view. Dismiss is a
+         separate control because it means the opposite thing: leave the world
+         alone, stop telling me. */
+      bar.onclick = () => this._act();
+      dismiss.onclick = (e) => { e.stopPropagation(); this._dismiss(); };
+
+      this._bar = bar;
+      this._els = { dot, count, title, body, pages, of, dismiss };
+      this._pageNodes = [];
+      this._subject = null;
+
+      this._startCycle();
+
+      const root = HC.el("div");
+      HC.add(root, style, bar);
+      return root;
+    }
+
+    /* The timer cycles the bar, and it is also what makes `trigger_delay`
+       honest: the garage alert becomes true ten minutes after the door opened,
+       which is not a state change, so nothing else would wake this card. */
+    _startCycle() {
+      const secs = Number(this._config.cycle_interval || 6);
+      if (this._timer || !(secs > 0)) return;
+      this._timer = setInterval(() => {
+        this._i++;
+        if (this.hass) this.update();
+      }, secs * 1000);
+    }
+
+    connectedCallback() { if (this._built) this._startCycle(); }
+
+    disconnectedCallback() {
+      if (this._timer) clearInterval(this._timer);
+      this._timer = null;
+      for (const k in this._tmplSub) {
+        try { this._tmplSub[k](); } catch (e) { /* already gone */ }
+      }
+      this._tmplSub = {};
+    }
+
+    /* ---- active set ------------------------------------------------- */
+
+    _key(alert) { return alert._idx + ":" + alert.entity; }
+
+    /* ---- Jinja ------------------------------------------------------- *
+     * Messages may carry a template. HA renders it over a subscription that
+     * pushes a fresh value whenever the underlying state moves, so the wind
+     * message updates itself without this card polling anything.
+     */
+    _jinja(tpl) {
+      if (this._tmpl[tpl] != null) return this._tmpl[tpl];
+      if (this._tmplSub[tpl] !== undefined) return null;   // in flight
+      if (!this.hass || !this.hass.connection) return null;
+
+      this._tmplSub[tpl] = null;
+      this.hass.connection.subscribeMessage(
+        (m) => {
+          this._tmpl[tpl] = m && m.result != null ? String(m.result) : "";
+          if (this.hass) this.update();
+        },
+        { type: "render_template", template: tpl }
+      ).then((unsub) => {
+        /* Disconnected while the socket was answering: close it now rather
+           than holding a subscription open for a card that is gone. */
+        if (!this.isConnected) { try { unsub(); } catch (e) { /* gone */ } return; }
+        this._tmplSub[tpl] = unsub;
+      }).catch(() => {
+        /* A template that will not render is not worth blocking the alert it
+           decorates -- show the message without it. */
+        this._tmpl[tpl] = "";
+        if (this.hass) this.update();
+      });
+      return null;
+    }
+
+    _message(alert) {
+      const raw = String(alert.message || "");
+      if (raw.indexOf("{{") < 0 && raw.indexOf("{%") < 0) return raw;
+      const done = this._jinja(raw);
+      /* While it is in flight, strip the template rather than showing its
+         source to the family. */
+      return done != null ? done : raw.replace(/\{\{[\s\S]*?\}\}/g, "").trim();
+    }
+
+    /* ---- actions ----------------------------------------------------- */
+
+    _act() {
+      const alert = this._current;
+      if (!alert) return;
+      const a = alert.tap_action;
+      if (!a) { this.moreInfo(alert.entity); return; }
+
+      if (a.action === "call-service" || a.action === "perform-action") {
+        const svc = a.service || a.perform_action || "";
+        const dot = svc.indexOf(".");
+        if (dot < 0) return;
+        this.callService(svc.slice(0, dot), svc.slice(dot + 1),
+                         Object.assign({}, a.data, a.target));
+        return;
+      }
+      if (a.action === "navigate" && a.navigation_path) {
+        history.pushState(null, "", a.navigation_path);
+        window.dispatchEvent(new Event("location-changed"));
+        return;
+      }
+      this.moreInfo((a.entity_id) || alert.entity);
+    }
+
+    /* Local and deliberately forgetful: this hides the alert on this screen
+       until it goes false and comes back, or until the page reloads. The
+       durable version of "dealt with" is the alert's own tap action -- turning
+       the mail flag off is what actually makes the mail alert untrue, and it
+       clears it on every screen in the house at once. */
+    _dismiss() {
+      if (!this._current) return;
+      this._dismissed[this._key(this._current)] = true;
+      this.update();
+    }
+
+    /* ---- render ------------------------------------------------------ */
+
+    update() {
+      const all = tickActive(this.hass, this._config.alerts, Date.now());
+
+      /* An alert that has gone away and come back is news again, so the
+         dismissal dies with it rather than silencing it forever. */
+      const live = {};
+      for (const a of all) live[this._key(a)] = true;
+      for (const k in this._dismissed) if (!live[k]) delete this._dismissed[k];
+
+      const shown = all.filter((a) => !this._dismissed[this._key(a)]);
+      this._setVisible(shown.length > 0);
+      if (!shown.length) { this._current = null; return; }
+
+      const i = ((this._i % shown.length) + shown.length) % shown.length;
+      const alert = shown[i];
+      this._current = alert;
+
+      const priority = Number(alert.priority) || 3;
+      this._bar.className = "tick p" + (priority < 1 ? 1 : priority > 3 ? 3 : priority);
+
+      const { title, body } = tickSplit(this._message(alert));
+      HC.setText(this._els.count, "Alerts · " + shown.length);
+      HC.setText(this._els.title, title);
+      HC.setText(this._els.body, body);
+      this._els.body.style.display = body ? "" : "none";
+      this._els.dot.style.background = priority === 1 ? "var(--hc-red)"
+        : priority === 3 ? "var(--hc-blue)" : "var(--hc-amber)";
+
+      this._setPages(shown.length, i);
+
+      /* Fade only when the bar changes subject. "3 alerts" becoming "2 alerts"
+         while the same one is on screen is not a swap. */
+      const subject = this._key(alert);
+      if (this._subject !== null && this._subject !== subject) {
+        this._bar.classList.remove("swap");
+        void this._bar.offsetWidth;
+        this._bar.classList.add("swap");
+      }
+      this._subject = subject;
+    }
+
+    /* One dot per alert while you can still count them at a glance, and a
+       mono `3 / 12` once you cannot. Twelve dots is not a page indicator, it
+       is a decoration.
+       One alert gets nothing at all: a single dot indicates no paging, it just
+       sits there next to DISMISS looking like a control that does not work. */
+    _setPages(n, i) {
+      if (n < 2) {
+        this._els.pages.style.display = "none";
+        this._els.of.style.display = "none";
+        return;
+      }
+      const dots = n <= 6;
+      this._els.pages.style.display = dots ? "" : "none";
+      this._els.of.style.display = dots ? "none" : "";
+
+      if (!dots) { HC.setText(this._els.of, (i + 1) + " / " + n); return; }
+      if (this._pageNodes.length !== n) {
+        this._els.pages.textContent = "";
+        this._pageNodes = [];
+        for (let k = 0; k < n; k++) {
+          const d = HC.el("span", "pg");
+          HC.add(this._els.pages, d);
+          this._pageNodes.push(d);
+        }
+      }
+      this._pageNodes.forEach((d, k) => HC.setClass(d, "on", k === i));
+    }
+
+    /* A clear house gets no bar at all -- that is the point of a ticker rather
+       than a tile. The event lets hc-layout close the row up behind it, so the
+       page does not keep a 16px gap for something that is not there. */
+    _setVisible(on) {
+      if (this._visible === on) return;
+      this._visible = on;
+      this.style.display = on ? "" : "none";
+      this.dispatchEvent(new CustomEvent("hc-visibility", {
+        bubbles: true, composed: true, detail: { visible: on }
+      }));
+    }
+
+    getCardSize() { return 1; }
+  }
+
+  HC.define("hc-ticker", Ticker, {
+    name: "Alert ticker",
+    description: "What is wrong, in priority order, from the shared alert set.",
+    preview: false
+  });
+
+  /* ------------------------------------------------------------------ *
+   * hc-soil
+   * ------------------------------------------------------------------ *
+   * A soil probe, answering the only question anybody asks it: do I need to
+   * water today?
+   *
+   * A bare "4%" is not an answer. Nobody carries the range of a capacitive
+   * probe in their head, so the reading is drawn ON a scale with the watering
+   * line marked, and the verdict is written out in words above it. The number
+   * is there to be checked against, not to be interpreted.
+   *
+   * THE VERDICT READS THE RAIN. hc-taps already refuses to tell you to water
+   * when a soaking is due, using the same `rain_24h`/`rain_48h` helpers the
+   * garden automations act on. This card sits directly above it on the Garden
+   * view, so it reads the same two helpers -- two cards on one page disagreeing
+   * about whether to water is worse than either of them being wrong alone.
+   *
+   * THE PROBE'S OWN ALARMS ARE PREFERRED TO OUR OWN ARITHMETIC where it has
+   * one. Fertility is the case that matters: EC in uS/cm means nothing without
+   * knowing the soil, the crop and the extraction method, and a threshold
+   * invented here would be a confident number with nothing behind it. The
+   * device ships a `soil_fertility_warning`, so the card reports that and
+   * shows the raw figure beside it, rather than grading it.
+   *
+   * ONE PROBE IS ONE SPOT. It speaks for the bed it is pushed into and not for
+   * the garden, which is why the caption names the probe rather than letting
+   * "the soil" stand for everywhere.
+   */
+
+  const SOIL_CSS = `
+  .soil-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .soil-verdict { font-size: 20px; font-weight: 600; line-height: 1.3; }
+  .soil-verdict.bad  { color: var(--hc-red-ink); }
+  .soil-verdict.warn { color: var(--hc-amber-deep); }
+  .soil-verdict.good { color: var(--hc-green-deep); }
+  .soil-verdict.cool { color: var(--hc-blue-ink); }
+  .soil-why { font-size: 14px; color: var(--hc-ink-2); }
+
+  .soil-read { display: flex; align-items: baseline; gap: 8px; }
+  .soil-read .metric { font-size: 40px; }
+
+  /* ---- the scale --------------------------------------------------- *
+     Three bands, not five. The extra two carried no decision: "quite dry"
+     and "very dry" both mean water it. */
+  .soil-scale { position: relative; padding-top: 22px; }
+  .soil-bands { display: flex; height: 14px; border-radius: var(--hc-r-bar);
+                overflow: hidden; }
+  .soil-band { height: 100%; }
+  .soil-band.dry  { background: var(--hc-amber-tint-3); }
+  .soil-band.ok   { background: var(--hc-green-tint); }
+  .soil-band.wet  { background: var(--hc-blue-tint); }
+  .soil-ticks { display: flex; margin-top: 6px; font-family: var(--hc-mono);
+                font-size: 10px; letter-spacing: .12em; text-transform: uppercase;
+                color: var(--hc-faint); }
+  .soil-tick { text-align: center; }
+
+  /* The marker is a pin above the bar rather than a fill inside it: a fill
+     would read as "how full", and moisture is a position on a range, not a
+     quantity accumulating. */
+  .soil-pin { position: absolute; top: 0; transform: translateX(-50%);
+              display: flex; flex-direction: column; align-items: center;
+              transition: left .5s ease; }
+  .soil-pin-label { font-family: var(--hc-mono); font-size: 11px; font-weight: 600;
+                    color: var(--hc-ink); white-space: nowrap; }
+  .soil-pin-stem { width: 2px; height: 8px; background: var(--hc-ink); }
+  .soil-pin.off .soil-pin-label, .soil-pin.off .soil-pin-stem { opacity: .35; }
+
+  .soil-stats { display: flex; gap: 18px; flex-wrap: wrap;
+                padding-top: 12px; border-top: 1px solid var(--hc-rule); }
+  .soil-stat { display: flex; flex-direction: column; gap: 2px; }
+  .soil-stat .k { font-family: var(--hc-mono); font-size: 10px; letter-spacing: .12em;
+                  text-transform: uppercase; color: var(--hc-faint); }
+  .soil-stat .v { font-family: var(--hc-mono); font-size: 14px; font-weight: 600; }
+  .soil-stat .v.alarm { color: var(--hc-amber-deep); }
+  @media (prefers-reduced-motion: reduce) { .soil-pin { transition: none; } }
+  `;
+
+  /* The probe reports a percentage, but the useful part of the range is the
+     bottom half -- a bed at 70% is flooded, and stretching the scale to 100
+     squeezes every decision into the left third of the bar. */
+  const SOIL_MAX = 70;
+
+  class Soil extends HC.Card {
+    build() {
+      const cfg = this._config;
+      const g = HC.roles(cfg, "garden", this.hass) || {};
+      this._g = g;
+      this._s = cfg.soil || g.soil || {};
+
+      const style = HC.el("style");
+      style.textContent = SOIL_CSS;
+
+      const card = HC.el("div", "card hero tone");
+      this._card = card;
+
+      const head = HC.el("div", "row between baseline");
+      this._eyebrow = HC.el("span", "eyebrow");
+      HC.add(head, HC.el("span", "title", cfg.title || "Soil"), this._eyebrow);
+
+      this._verdict = HC.el("div", "soil-verdict");
+      this._why = HC.el("div", "soil-why");
+
+      /* Reading and scale share a row on a wide card and stack on a phone --
+         the scale is the part that must stay wide enough to read. */
+      const readRow = HC.el("div", "soil-read");
+      this._metric = HC.el("span", "metric", "--");
+      this._unit = HC.el("span", "unit", "%");
+      this._alarm = HC.pill("", "idle");
+      this._alarm.style.display = "none";
+      HC.add(readRow, this._metric, this._unit, this._alarm);
+
+      const scale = HC.el("div", "soil-scale");
+      const bands = HC.el("div", "soil-bands");
+      this._bDry = HC.el("div", "soil-band dry");
+      this._bOk = HC.el("div", "soil-band ok");
+      this._bWet = HC.el("div", "soil-band wet");
+      HC.add(bands, this._bDry, this._bOk, this._bWet);
+
+      const ticks = HC.el("div", "soil-ticks");
+      this._tDry = HC.el("div", "soil-tick", "Water");
+      this._tOk = HC.el("div", "soil-tick", "Good");
+      this._tWet = HC.el("div", "soil-tick", "Wet");
+      HC.add(ticks, this._tDry, this._tOk, this._tWet);
+
+      this._pin = HC.el("div", "soil-pin");
+      this._pinLabel = HC.el("div", "soil-pin-label", "--");
+      HC.add(this._pin, this._pinLabel, HC.el("div", "soil-pin-stem"));
+
+      HC.add(scale, this._pin, bands, ticks);
+
+      const stats = HC.el("div", "soil-stats");
+      const mk = (label) => {
+        const s = HC.el("div", "soil-stat");
+        const v = HC.el("div", "v", "--");
+        HC.add(s, HC.el("div", "k", label), v);
+        HC.add(stats, s);
+        return v;
+      };
+      this._vTemp = mk("Soil temp");
+      this._vFeed = mk("Feed");
+      this._vLight = mk("Light");
+      this._vBatt = mk("Battery");
+      this._vAge = mk("Updated");
+
+      const col = HC.el("div", "col");
+      col.style.gap = "14px";
+      HC.add(col, head, this._verdict, this._why, readRow, scale, stats);
+      HC.add(card, col);
+
+      /* Every number on the page is a way into the entity behind it. */
+      readRow.style.cursor = "pointer";
+      readRow.addEventListener("click", () => this.moreInfo(this._s.moisture));
+
+      const root = HC.el("div");
+      HC.add(root, style, card);
+      return root;
+    }
+
+    /* Where the bands sit is a function of the thresholds, which are helpers a
+       person can move, so the bar is laid out on every update rather than at
+       build time. */
+    _layout(dry, wet) {
+      const pct = (v) => (Math.max(0, Math.min(SOIL_MAX, v)) / SOIL_MAX) * 100;
+      const a = pct(dry), b = pct(wet);
+      this._bDry.style.width = a + "%";
+      this._bOk.style.width = (b - a) + "%";
+      this._bWet.style.width = (100 - b) + "%";
+      this._tDry.style.width = a + "%";
+      this._tOk.style.width = (b - a) + "%";
+      this._tWet.style.width = (100 - b) + "%";
+      return pct;
+    }
+
+    update() {
+      const s = this._s;
+      const th = this._th;
+      const dry = th.soil_dry, wet = th.soil_wet;
+      const pct = this._layout(dry, wet);
+
+      const m = HC.read(this.hass, s.moisture);
+      const moisture = m.value;
+
+      HC.setText(this._metric, moisture == null ? "--" : Math.round(moisture));
+      this._pin.style.left = pct(moisture == null ? 0 : moisture) + "%";
+      HC.setClass(this._pin, "off", moisture == null);
+      HC.setText(this._pinLabel, moisture == null ? "--" : Math.round(moisture) + "%");
+
+      /* The probe's own water alarm. It is shown beside our verdict rather
+         than instead of it: the device knows nothing about the forecast, so it
+         can be shouting "dry" on a morning when the right answer is to wait. */
+      const warn = HC.read(this.hass, s.water_warning);
+      const alarming = warn.ok && warn.state !== "normal" && warn.state !== "off";
+      this._alarm.style.display = alarming ? "" : "none";
+      if (alarming) {
+        this._alarm.setTone("warn");
+        HC.setText(this._alarm, "Probe says dry");
+      }
+
+      const v = HC.soilVerdict(m.ok ? moisture : null, th,
+                               HC.read(this.hass, this._g.rain_24h).value,
+                               HC.read(this.hass, this._g.rain_48h).value);
+      this._tone(v.tone);
+      HC.setText(this._verdict, v.verdict);
+      HC.setText(this._why, v.why);
+
+      const t = HC.read(this.hass, s.temperature);
+      HC.setText(this._vTemp, t.value == null ? "--" : HC.dec(t.value, 1) + "°");
+
+      /* Fertility is reported, not graded -- see the note at the top. */
+      const f = HC.read(this.hass, s.fertility);
+      const fw = HC.read(this.hass, s.fertility_warning);
+      const fLow = fw.ok && fw.state !== "normal" && fw.state !== "off";
+      HC.setText(this._vFeed, f.value == null ? "--"
+        : Math.round(f.value) + " µS" + (fLow ? " · low" : ""));
+      HC.setClass(this._vFeed, "alarm", fLow);
+
+      const lx = HC.read(this.hass, s.illuminance);
+      HC.setText(this._vLight, lx.value == null ? "--" : HC.commas(lx.value) + " lx");
+
+      const b = HC.read(this.hass, s.battery);
+      HC.setText(this._vBatt, b.value == null ? "--" : Math.round(b.value) + "%");
+      this._vBatt.style.color = b.value != null && b.value < th.battery_replace
+        ? "var(--hc-red-ink)" : "";
+
+      /* A probe on a ten-minute sampling interval that last spoke an hour ago
+         has dropped off the mesh, and a stale reading presented as current is
+         how you water a bed that has since had 8mm on it. */
+      HC.setText(this._vAge, m.ok ? HC.ago(m.updated) : "--");
+      const stale = m.ok && m.updated
+        && (Date.now() - new Date(m.updated).getTime()) > (s.stale_minutes || 60) * 60000;
+      HC.setText(this._eyebrow, !m.ok ? "PROBE NOT REPORTING"
+        : stale ? "READING IS STALE"
+        : (s.name || "Soil probe").toUpperCase());
+      HC.setClass(this._card, "gap", !m.ok || stale);
+    }
+
+    _tone(tone) {
+      for (const t of ["good", "warn", "bad", "cool", "idle"]) {
+        HC.setClass(this._card, "tone-" + t, t === tone);
+        if (t !== "idle") HC.setClass(this._verdict, t, t === tone);
+      }
+    }
+
+    getCardSize() { return 6; }
+  }
+
+  HC.define("hc-soil", Soil, {
+    name: "Soil probe",
+    description: "A soil moisture probe read as a decision: water today, or don't.",
+    preview: true
+  });
+
+  /* ------------------------------------------------------------------ *
+   * hc-blinds
+   * ------------------------------------------------------------------ *
+   * Roller blinds on a one-way RF bridge, which is to say: blinds whose
+   * position nothing in this house actually knows.
+   *
+   * THE HONESTY PROBLEM. The Bond bridge speaks to these motors and never
+   * hears back -- HA marks the entity `assumed_state: true` and its state is
+   * not a position, it is a memory of the last command sent. The kids also
+   * have wall buttons wired straight to the motors, which the bridge cannot
+   * see at all. So the `cover.*` state can be confidently wrong for days, and
+   * a card that renders it as "Open" is lying with a straight face.
+   *
+   * The card therefore carries three separate things and never lets them
+   * pretend to be one:
+   *
+   *   BELIEF    what we think, and WHERE THAT CAME FROM -- a command we sent,
+   *             a person confirming by eye, or nothing. Held in an
+   *             input_select so it survives a reload and is shared by every
+   *             screen in the house, rather than being re-guessed per tablet.
+   *   EVIDENCE  what the room's light meter suggests right now. A hint, in
+   *             hedged words, never promoted to the state.
+   *   CONTROL   open / stop / close, as three buttons. A toggle would have to
+   *             know the current position to pick its action, and that is
+   *             precisely what is unavailable.
+   *
+   * WHY A RATIO AND NOT A LUX THRESHOLD. "Under 150 lx means shut" holds on a
+   * clear afternoon and falls apart under heavy overcast, when a room with the
+   * blind wide open reads a couple of hundred. Dividing by an outdoor reading
+   * takes the weather out: with the blind up a window passes some percent of
+   * what is falling outside, and with it down it passes almost none. Both the
+   * room sensors and the garden probe clip around 3000 lx, which costs nothing
+   * here -- when both ends are pegged the room is plainly bright.
+   *
+   * The two ratios are configurable and deliberately leave a wide band in the
+   * middle reading "can't tell". They are a first estimate: nobody has yet sat
+   * in Summer's room at noon with the blind down and written the number
+   * against it. Tune them, do not trust them.
+   *
+   * WHEN THE SUN IS DOWN THERE IS NO EVIDENCE, and the card says so rather
+   * than reading a bedside lamp as an open blind.
+   */
+
+  const BLIND_CSS = `
+  .bl-grid { display: grid; gap: 12px;
+             grid-template-columns: repeat(var(--bcols, 2), minmax(0, 1fr)); }
+  @media (max-width: 700px) { .bl-grid { grid-template-columns: 1fr; } }
+
+  .bl {
+    display: flex; flex-direction: column; gap: 10px;
+    padding: 14px 16px; border-radius: var(--hc-r-tile);
+    background: var(--hc-sunken); border: 1px solid var(--hc-border);
+  }
+  .bl.unsure { border-color: var(--hc-amber-border); background: var(--hc-amber-tint); }
+  .bl.clash  { border-color: var(--hc-amber-border); background: var(--hc-amber-tint); }
+
+  .bl-top { display: flex; align-items: center; gap: 10px; }
+  .bl-icon { width: 34px; height: 34px; border-radius: 50%; flex: none;
+             display: grid; place-items: center;
+             background: var(--hc-rule); color: var(--hc-muted); cursor: pointer; }
+  .bl.up .bl-icon   { background: var(--hc-blue-tint); color: var(--hc-blue-ink); }
+  .bl.down .bl-icon { background: var(--hc-green-tint); color: var(--hc-green-deep); }
+  .bl-name { font-size: 15px; font-weight: 600; flex: 1; min-width: 0; }
+
+  .bl-state { font-size: 22px; font-weight: 600; line-height: 1.1; }
+  .bl-since { font-size: 13px; color: var(--hc-muted); }
+
+  .bl-btns { display: grid; grid-template-columns: 1fr auto 1fr; gap: 8px; }
+  .bl-btn {
+    font-size: 13px; font-weight: 600; padding: 8px 10px;
+    border-radius: var(--hc-r-btn); border: 1px solid var(--hc-border);
+    background: var(--hc-surface); color: var(--hc-ink);
+    cursor: pointer; white-space: nowrap;
+  }
+  .bl-btn:disabled { opacity: .45; cursor: default; }
+  .bl-btn.stop { color: var(--hc-muted); }
+
+  /* Only on screen when the belief is actually in doubt -- see the note about
+     nothing being a real state. */
+  .bl-fix { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+            padding-top: 10px; border-top: 1px dashed var(--hc-amber-border); }
+  .bl-fix .q { font-size: 13px; color: var(--hc-amber-body); flex: 1; min-width: 120px; }
+  .bl-fix .bl-btn { padding: 5px 10px; font-size: 12px; }
+
+  .bl-note { font-size: 12px; color: var(--hc-muted); }
+  `;
+
+  /* The ratios themselves, and both rules that read them, live in
+     core/11-blinds.js so the offline harness can run them. */
+  const UP = HC.BLIND_UP, DOWN = HC.BLIND_DOWN, UNKNOWN = HC.BLIND_UNKNOWN;
+
+  class Blinds extends HC.Card {
+    build() {
+      const cfg = this._config;
+      const list = HC.roles(cfg, "blinds", this.hass) || [];
+      this._house = HC.roles(cfg, "house", this.hass) || {};
+      /* Overridable per card, because the pair that separates up from down is a
+         fact about a window, not about the kit. */
+      this._ratios = {};
+      if (HC.num(cfg.open_ratio) != null) this._ratios.open = Number(cfg.open_ratio);
+      if (HC.num(cfg.shut_ratio) != null) this._ratios.shut = Number(cfg.shut_ratio);
+      if (HC.num(cfg.min_elevation) != null) this._ratios.min_elevation = Number(cfg.min_elevation);
+
+      const style = HC.el("style");
+      style.textContent = BLIND_CSS;
+
+      const card = HC.el("div", "card");
+      const wrap = HC.el("div", "col");
+      wrap.style.gap = "14px";
+
+      const head = HC.el("div", "row between baseline");
+      this._eyebrow = HC.el("span", "eyebrow");
+      HC.add(head, HC.el("span", "title", cfg.title || "Blinds"), this._eyebrow);
+      HC.add(wrap, head);
+
+      const grid = HC.el("div", "bl-grid");
+      grid.style.setProperty("--bcols", String(cfg.columns || Math.min(2, list.length || 1)));
+
+      this._rows = list.map((b) => {
+        const row = HC.el("div", "bl");
+
+        const top = HC.el("div", "bl-top");
+        const iconWrap = HC.el("div", "bl-icon");
+        const icon = document.createElement("ha-icon");
+        icon.setAttribute("icon", b.icon || "mdi:roller-shade");
+        HC.add(iconWrap, icon);
+        const name = HC.el("div", "bl-name ellipsis", b.name || b.cover);
+        const ev = HC.pill("", "idle");
+        HC.add(top, iconWrap, name, ev);
+        iconWrap.addEventListener("click", () => this.moreInfo(b.cover));
+
+        const state = HC.el("div", "bl-state", "--");
+        const since = HC.el("div", "bl-since");
+
+        const btns = HC.el("div", "bl-btns");
+        const mkBtn = (label, cls, service) => {
+          const n = HC.el("button", "bl-btn" + (cls ? " " + cls : ""), label);
+          n.type = "button";
+          n.addEventListener("click", (e) => {
+            e.stopPropagation();
+            this._command(b, service);
+          });
+          HC.add(btns, n);
+          return n;
+        };
+        const bUp = mkBtn("Open", null, "open_cover");
+        const bStop = mkBtn("Stop", "stop", "stop_cover");
+        const bDown = mkBtn("Close", null, "close_cover");
+
+        /* The reconcile strip. Built once and hidden, because building it on
+           demand would mean touching the tree during update(). */
+        const fix = HC.el("div", "bl-fix");
+        const q = HC.el("div", "q");
+        const fUp = HC.el("button", "bl-btn", "It's up");
+        const fDown = HC.el("button", "bl-btn", "It's down");
+        fUp.type = fDown.type = "button";
+        fUp.addEventListener("click", () => this._believe(b, UP));
+        fDown.addEventListener("click", () => this._believe(b, DOWN));
+        HC.add(fix, q, fUp, fDown);
+        fix.style.display = "none";
+
+        HC.add(row, top, state, since, btns, fix);
+        HC.add(grid, row);
+        return { b, row, ev, state, since, btns: [bUp, bStop, bDown], fix, q };
+      });
+
+      HC.add(wrap, grid);
+
+      this._note = HC.el("div", "bl-note");
+      HC.add(wrap, this._note);
+      HC.add(card, wrap);
+
+      const root = HC.el("div");
+      HC.add(root, style, card);
+      return root;
+    }
+
+    /* Send the command AND record what we now believe, in that order. The
+       automation on the box does the same thing from the other side, for
+       commands that did not come from this card -- a schedule, a voice
+       assistant, the HA app. Doing it here too means the tile does not sit
+       stale for the second or two that round trip takes. */
+    _command(b, service) {
+      this.callService("cover", service, { entity_id: b.cover });
+      if (service === "open_cover") this._believe(b, UP);
+      else if (service === "close_cover") this._believe(b, DOWN);
+      /* Stop leaves it somewhere in between, which is exactly not knowing. */
+      else this._believe(b, UNKNOWN);
+    }
+
+    _believe(b, value) {
+      if (!b.belief) return;
+      this.callService("input_select", "select_option",
+                       { entity_id: b.belief, option: value });
+    }
+
+    update() {
+      let unsure = 0, clashes = 0;
+
+      for (const r of this._rows) {
+        const b = r.b;
+        const cov = HC.read(this.hass, b.cover);
+        const { belief, source, at } = HC.blindBelief(this.hass, b);
+        const ev = HC.blindEvidence(this.hass, b, this._house.sun, this._ratios);
+        const clash = belief !== UNKNOWN && ev && ev.verdict && ev.verdict !== belief;
+        if (belief === UNKNOWN) unsure++;
+        if (clash) clashes++;
+
+        HC.setClass(r.row, "up", belief === UP && !clash);
+        HC.setClass(r.row, "down", belief === DOWN && !clash);
+        HC.setClass(r.row, "unsure", belief === UNKNOWN);
+        HC.setClass(r.row, "clash", !!clash);
+        HC.setClass(r.row, "gap", !cov.ok);
+
+        HC.setText(r.state, belief === UP ? "Up" : belief === DOWN ? "Down" : "Not sure");
+
+        /* The caption's whole job is to stop the state word being read as a
+           measurement. It always says where the belief came from. */
+        HC.setText(r.since,
+          !cov.ok ? "The bridge is not reachable."
+          : belief === UNKNOWN
+            ? (source === "none" ? "Nothing has told us either way."
+               : "Changed in the room, or stopped part way.")
+          : source === "cover"
+            ? `Last command ${HC.ago(at)} — no one has confirmed it.`
+            : `Set ${HC.ago(at)}.`);
+
+        /* Evidence is a hint and is worded like one. */
+        if (!ev) {
+          r.ev.setTone("idle");
+          HC.setText(r.ev, "No light read");
+        } else if (ev.verdict === UP) {
+          r.ev.setTone("cool");
+          HC.setText(r.ev, "Room is light");
+        } else if (ev.verdict === DOWN) {
+          r.ev.setTone("good");
+          HC.setText(r.ev, "Room is dark");
+        } else {
+          r.ev.setTone("idle");
+          HC.setText(r.ev, "Light unclear");
+        }
+
+        for (const btn of r.btns) btn.disabled = !cov.ok;
+
+        const askable = !!b.belief && (belief === UNKNOWN || clash);
+        r.fix.style.display = askable ? "" : "none";
+        if (askable) {
+          HC.setText(r.q, clash
+            ? `We think it is ${belief.toLowerCase()}, but the room looks ${
+                ev.verdict === UP ? "light" : "dark"}. Which is it?`
+            : "Which is it?");
+        }
+      }
+
+      HC.setText(this._eyebrow,
+        clashes ? `${clashes} DISAGREE`
+        : unsure ? `${unsure} NOT SURE`
+        : `${this._rows.length} BLINDS`);
+
+      /* Said once under the grid rather than once per tile: it is a fact about
+         the bridge, not about any one blind. */
+      HC.setText(this._note, this._rows.length
+        ? "The bridge sends but never listens, and the wall buttons bypass it — "
+          + "so these are what we believe, not what we can see."
+        : "No blinds configured.");
+    }
+
+    getCardSize() { return 4; }
+  }
+
+  HC.define("hc-blinds", Blinds, {
+    name: "Blinds",
+    description: "One-way roller blinds: what we believe, what the room's light "
+               + "suggests, and open / stop / close.",
     preview: true
   });
 

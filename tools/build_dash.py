@@ -21,6 +21,20 @@ try:
 except ImportError:
     sys.exit("tools/house_private.py is missing -- see gen_roles.py's docstring")
 
+# The alert set is defined once, one repo over, in alerts/alerts_def.py. The
+# AlertTicker carries its entire alert list in its own card config -- an
+# unconfigured `custom:alert-ticker-card` is not "the ticker with default
+# alerts", it is a card that matches nothing and renders nothing, which is how
+# this page sat silent through a mail arrival that had already reached everyone's
+# phone. Import the definitions rather than copying the JSON, so the ticker here
+# and the one on the old Summary view cannot come to disagree about what an
+# alert is.
+sys.path.insert(0, str(HERE / ".." / ".." / "alerts"))
+try:
+    import alerts_def as A
+except ImportError:  # pragma: no cover -- only when the repos are split up
+    sys.exit("cannot import ../../alerts/alerts_def.py -- the ticker needs its alert set")
+
 house = json.loads((HERE / "house_roles.json").read_text())
 R = house["roles"]
 
@@ -47,6 +61,23 @@ def stack(*cards):
     return {"type": "vertical-stack", "cards": list(cards)}
 
 
+def ticker_card():
+    """hc-ticker, carrying the whole alert set from alerts_def.
+
+    Same `alerts` list the AlertTicker gets on the old Summary view -- the alert
+    set is defined once and both cards are renderers of it. This one is in the
+    kit so the bar follows the page's tokens into dark mode, and so the design's
+    layout (count, divider, title + body, page dots, dismiss) exists at all: the
+    AlertTicker's fifty themes are all dark neon gradients and it exposes no
+    colour or layout config.
+    """
+    return {
+        "type": "custom:hc-ticker",
+        "cycle_interval": 6,
+        "alerts": [dict(a["card"]) for a in A.ALERTS],
+    }
+
+
 # The two AirGradient cards are preserved exactly as they were -- see the
 # handoff. Their entities, like the weather and the garage switches below, name
 # this house, so they come from house_private rather than being typed here.
@@ -64,8 +95,9 @@ page = {
     # No background here: hc-layout takes it from --hc-page, which follows
     # HA in and out of dark mode. Setting a literal pins it to one theme.
     "rows": [
-        # The ticker is the existing AlertTicker card, unchanged.
-        {"cards": [{"type": "custom:alert-ticker-card"}]},
+        # Absent on a quiet day: hc-ticker hides itself and hc-layout closes the
+        # row up, so the page starts at Who's home.
+        {"cards": [ticker_card()]},
 
         {"columns": "1fr 300px", "cards": [
             card("hc-who-is-home", ["people"]),
@@ -82,8 +114,14 @@ page = {
 
         {"columns": "340px 1fr", "cards": [
             stack(AIR_OUTSIDE, AIR_INSIDE),
+            # The blinds sit under What's on because they belong to the same
+            # question -- what can I operate from here, right now. They are on
+            # the family page rather than only the AirCon one because the people
+            # who move them are the two kids and whoever is putting them to bed,
+            # none of whom go looking for an air-conditioning tab.
             stack(card("hc-energy-now", ["energy"]),
-                  card("hc-whats-on", ["lights"])),
+                  card("hc-whats-on", ["lights"]),
+                  card("hc-blinds", ["blinds", "house"], columns=2)),
         ]},
 
         {"cards": [card("hc-room-grid", ["rooms"], columns=4)]},
@@ -134,6 +172,14 @@ aircon_page = {
         {"cards": [card("hc-room-grid", ["rooms"], columns=4,
                         title="Room temperatures")]},
 
+        # Blinds are part of the thermal argument, not a decoration: a west-
+        # facing bedroom with the blind up in the afternoon is the reason a
+        # damper is wide open and the unit is still losing. They are on the Home
+        # view too -- this copy is here for whoever is on this page trying to
+        # work out why a room will not come down.
+        {"cards": [card("hc-blinds", ["blinds", "house"],
+                        title="Kids' blinds", columns=2)]},
+
         {"cards": [{"type": "weather-forecast",
                     "entity": DASH["weather"],
                     "forecast_type": "hourly",
@@ -156,6 +202,12 @@ garden_page = {
     "max_width": 1360,
     "gap": 16,
     "rows": [
+        # The probe leads the page. "Do I need to water" is the question the
+        # Garden view exists to answer, and the taps below are what you do about
+        # the answer -- so the verdict comes first and the controls follow it,
+        # rather than the page opening with four valves and leaving the reader
+        # to work out whether to touch any of them.
+        {"cards": [card("hc-soil", ["garden"], title="Soil")]},
         {"cards": [card("hc-taps", ["garden"], title="Garden taps", columns=2)]},
         # The gardener's forecast replaces the stock weather card: rain, wind
         # and UV are what decide watering, spraying and shading. Temperature is

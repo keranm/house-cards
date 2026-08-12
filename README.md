@@ -1,13 +1,13 @@
 # House Cards
 
 A kit of Lovelace cards for a family home dashboard, installed through HACS.
-Eight cards that share one design system, one stylesheet and one set of
+Twenty cards that share one design system, one stylesheet and one set of
 thresholds, so a page built from them reads as a page rather than a pile of
 widgets.
 
 One file, no dependencies, no build step beyond concatenating `src/`.
 
-> **Status: in development.** All eight cards are built and render against live
+> **Status: in development.** All twenty cards are built and render against live
 > data. The theme half (removing `box-shadow` from the stock cards this sits
 > beside) is not done.
 
@@ -42,6 +42,7 @@ strobes.
 
 | Card | What it answers |
 |---|---|
+| `hc-ticker` | What is wrong, worst first, or nothing at all |
 | `hc-who-is-home` | Who is in, where the others are, since when |
 | `hc-house-battery` | State of charge, direction, time to full or time left |
 | `hc-attention` | Doors and batteries, plus what the hour makes worth knowing |
@@ -50,6 +51,59 @@ strobes.
 | `hc-energy-now` | Live flow between solar, grid, battery and the house, all six edges |
 | `hc-whats-on` | Which lights are on, tap to toggle, all-off |
 | `hc-batteries` | Device batteries worst-first, healthy ones folded away |
+| `hc-soil` | Whether the bed needs watering, given the probe and the forecast |
+| `hc-blinds` | Blinds nothing can see the position of: belief, evidence, control |
+
+### The ticker owns everything that is wrong
+
+`hc-ticker` does not decide what an alert is. It is handed a list, and the list
+is generated from one definition file that also generates the Jinja behind
+`binary_sensor.house_alert_active`, so the bar and the boolean cannot disagree
+about whether the house is alright:
+
+```yaml
+type: custom:hc-ticker
+cycle_interval: 6
+alerts:
+  - entity: input_boolean.is_there_mail
+    state: "on"
+    message: "📬 Mail has arrived"
+    priority: 3
+    tap_action: { action: call-service, service: input_boolean.turn_off,
+                  target: { entity_id: input_boolean.is_there_mail } }
+```
+
+The matching rules are a port of the AlertTicker card's, deliberately including
+the parts that are arguably odd, because both cards look at the same house and a
+fact that appears on one view and not the other is worse than one that appears
+on neither. Supported: `entity`, a `device_class` sweep, an `entity_filter` glob
+or substring, `entity_filter_exclude`, the `= != < <= > >= contains
+not_contains` operators, `conditions` with `and`/`or` and `{entity}`
+self-reference, `trigger_delay`, `{name}`/`{state}`/`{entity}` in messages, and
+Jinja rendered by HA.
+
+Three things it does differently. **Priority is visible**: P1 is a red bar, P2
+the amber one the design specifies, P3 blue — a leak does not get to look like
+the post arriving. **Title and body split at the first em dash**, which the
+alert copy was already written for, so `🖴 Pi disk 94% full — time to purge
+recorder history` reads as a headline and a detail without a second field
+anybody has to remember to fill in. And **nothing is a real state**: with no
+alerts the card hides itself and `hc-layout` closes the row up behind it, so
+the page starts at Who's home on the days it should.
+
+`trigger_delay` is measured off `last_changed` rather than timed from render.
+The garage alert wants ten minutes of "still open"; a timer started when the
+card mounted would restart those ten minutes every time somebody walked past
+the tablet and woke the screen.
+
+Dismiss is local and deliberately forgetful — it hides the alert until it goes
+false and comes back. The durable version of "dealt with" is the alert's own
+`tap_action`: turning the mail flag off is what makes the mail alert untrue, and
+it clears it on every screen in the house at once.
+
+Not carried over from the AlertTicker: snooze, alert history, sound, grouping
+and the visual editor. This page wants the top three lines of that card and none
+of the rest.
 
 ### The rotating half of the attention row
 
@@ -100,6 +154,60 @@ rotate_seconds: 15
 bin_window: { open_hour: 7, close_hour: 7 }
 tiles: [doors, context, context, batteries]
 ```
+
+### The soil probe answers a question, not a quantity
+
+`hc-soil` exists because "4%" is not an answer. Nobody carries the range of a
+capacitive probe in their head, so the reading is drawn *on* a scale with the
+watering line marked and the verdict written out above it, and the number is
+there to be checked against rather than interpreted.
+
+The verdict holds two facts at once, and the ordering between them is the card:
+rain outranks dryness, wetness outranks rain. It reads the same
+`input_number.garden_rain_next_*` helpers `hc-taps` reads and the garden
+automations act on, because two cards on one page disagreeing about whether to
+water is worse than either being wrong alone.
+
+Where the probe ships a threshold of its own it wins. `soil_dry` points at the
+device's writable warning level, so the card and the device cannot call the same
+reading dry and normal, and dragging that number in the HA UI moves the card's
+scale with it. Fertility gets the same treatment in the other direction: µS/cm
+means nothing without knowing the soil and the crop, so the card reports the
+probe's own alarm and shows the raw figure beside it rather than inventing a
+grade for it.
+
+### Blinds that nothing can see
+
+`hc-blinds` is for one-way RF blinds — a bridge that transmits and never hears
+back, marked `assumed_state` by HA, whose state is not a position but a memory
+of the last command sent. Add wall buttons wired straight to the motors and the
+system can hold a confident wrong answer for days.
+
+So the card carries three things and never lets them pretend to be one:
+
+**Belief** — what we think, *and where that came from*: a command we sent, a
+person confirming by eye, or nothing. It lives in an `input_select` rather than
+being re-derived per screen, so a person who has just looked at the blind has
+somewhere to put that knowledge. `Unknown` is a first-class answer and most of
+any given day is spent in it.
+
+**Evidence** — what the room's light meter implies, in hedged words, never
+promoted to the state. It is a *ratio* of room light to an outdoor reference,
+not a lux threshold: a fixed threshold works on a clear afternoon and calls an
+open blind shut under heavy overcast. Dividing takes the weather out, because a
+cloud moves both readings together and a blind moves only one. When the sun is
+too low, or either meter is unavailable, there is no evidence and the card says
+so — a dead light meter reads as darkness, which is the shut answer, which is
+the worst failure available.
+
+**Control** — open, stop, close, as three buttons. A toggle would have to know
+the current position to choose its action, and that is precisely what is
+missing.
+
+When belief and evidence disagree the card says so and asks, rather than
+picking a winner. That reconcile strip is the only thing on the tile that
+appears conditionally, and it is on screen exactly when a one-tap answer from a
+human is worth more than anything the house can work out for itself.
 
 Every card works with no config at all — the generated role map already knows
 this house. Everything is overridable:

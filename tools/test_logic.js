@@ -158,16 +158,26 @@ check("nothing in this house currently needs a human", (() => {
 })());
 
 console.log("\nbin window");
-/* Collection is a Tuesday here, so daysTo is shifted to stand in for other
-   days rather than waiting a week to find out the window is wrong. */
-const binsAt = (shift, hour) => {
+/* daysTo is slid so the soonest collection lands exactly `shift` days out,
+   which is how these cases stand in for other days without waiting a week to
+   find out the window is wrong.
+   NORMALISED, not added to. Adding to the raw numbers only worked while
+   states.json happened to have been captured on a collection morning -- take a
+   fresh dump five days out, or in a week when the fortnightly recycling is not
+   due, and every case below fails on correct code. The relative spacing between
+   the streams is preserved, so a week where two bins go out together still
+   reads as one. */
+const binShift = (shift) => {
   const st = JSON.parse(JSON.stringify(hass.states));
-  for (const id in st) {
-    const a = st[id].attributes;
-    if (id.includes("waste_collection") && typeof a.daysTo === "number") a.daysTo += shift;
-  }
-  return HC.binWindow({ states: st }, roles.bins, new Date(2026, 7, 11, hour, 5));
+  const bins = Object.keys(st).filter((id) =>
+    id.includes("waste_collection") && typeof st[id].attributes.daysTo === "number");
+  const soonest = Math.min.apply(null, bins.map((id) => st[id].attributes.daysTo));
+  for (const id of bins) st[id].attributes.daysTo += shift - soonest;
+  return st;
 };
+
+const binsAt = (shift, hour) =>
+  HC.binWindow({ states: binShift(shift) }, roles.bins, new Date(2026, 7, 11, hour, 5));
 check("shut the morning before, before 7am", binsAt(1, 6).inWindow === false);
 check("open from 7am the day before", binsAt(1, 7).inWindow === true);
 check("still open at 10pm the night before", binsAt(1, 22).inWindow === true);
@@ -176,12 +186,29 @@ check("shut once the truck has been", binsAt(0, 7).inWindow === false);
 check("and stays shut all day after", binsAt(0, 18).inWindow === false);
 check("a past-7am collection day is 'collected', not 'nothing due'",
       binsAt(0, 9).collected === true);
-check("both streams are named on a recycling week",
-      binsAt(0, 3).names === "Rubbish + Recycling", binsAt(0, 3).names);
+/* Which bins share a week is the council's business and it changes; that every
+   bin sharing one gets named is this code's business. So force the tie rather
+   than asserting whatever the current fortnight happens to be doing -- the old
+   version hardcoded "Rubbish + Recycling" and started failing the week the
+   green bin came round with the red one. */
+check("every stream collected together is named", (() => {
+  const st = binShift(0);
+  for (const s of roles.bins.streams) st[s.entity].attributes.daysTo = 0;
+  const b = HC.binWindow({ states: st }, roles.bins, new Date(2026, 7, 11, 3, 5));
+  return b.due.length === 3 && b.names === "Rubbish + Recycling + Green waste";
+})(), (() => {
+  const st = binShift(0);
+  for (const s of roles.bins.streams) st[s.entity].attributes.daysTo = 0;
+  return HC.binWindow({ states: st }, roles.bins, new Date(2026, 7, 11, 3, 5)).names;
+})());
 
 console.log("\ncontext pool");
 const cconf = { roles };
-const poolAt = (hour, extra) => HC.contextCandidates(hass, cconf, th,
+/* `states` overrides the dump for cases that need the house in a particular
+   position -- the bin ones, which otherwise assert against whatever the
+   council is doing the week the tests happen to be run. */
+const poolAt = (hour, extra, states) => HC.contextCandidates(
+  states ? { states } : hass, cconf, th,
   Object.assign({ now: new Date(2026, 7, 11, hour, 5) }, extra || {}));
 
 check("day parts split by local hour",
@@ -189,10 +216,10 @@ check("day parts split by local hour",
    && HC.dayPart(new Date(2026, 7, 11, 16)) === "afternoon"
    && HC.dayPart(new Date(2026, 7, 11, 23)) === "late");
 check("bin night is sticky, so it cannot rotate away",
-      poolAt(3).sticky.some((c) => c.key === "bins"));
+      poolAt(3, null, binShift(0)).sticky.some((c) => c.key === "bins"));
 check("bins leave the row entirely after collection",
-      !poolAt(9).sticky.some((c) => c.key === "bins")
-   && !poolAt(9).ambient.some((c) => c.key === "bins_next"));
+      !poolAt(9, null, binShift(0)).sticky.some((c) => c.key === "bins")
+   && !poolAt(9, null, binShift(0)).ambient.some((c) => c.key === "bins_next"));
 check("every part of the day has something to say",
       [1, 6, 9, 12, 16, 20, 23].every((h) => poolAt(h).ambient.length >= 2),
       [1, 6, 9, 12, 16, 20, 23].map((h) => `${h}:${poolAt(h).ambient.length}`).join(" "));
@@ -277,6 +304,16 @@ const laundryAt = (state, remaining, total) => {
   /* Push the completion event out of the unload window so these cases test
      the status alone. */
   st[roles.laundry.last_event].state = new Date(Date.now() - 9e7).toISOString();
+  /* And clear the acknowledgement with it. Without this the helper pins two of
+     the three inputs and leaves the third to whenever the snapshot was taken:
+     if the last wash had been tapped away, the ack stamp sits AFTER this
+     back-dated completion and the finished tile is correctly suppressed -- so
+     "a finished washer asks to be emptied" fails on a true result. It passed
+     for as long as it did only because no dump had been taken since the button
+     was last used. */
+  st[roles.laundry.acknowledged] = {
+    state: "1970-01-01 00:00:00", attributes: { timestamp: 0 }
+  };
   const p = HC.contextCandidates({ states: st }, cconf, th, {});
   return p.sticky.find((c) => c.key === "laundry");
 };
@@ -592,11 +629,227 @@ check("a full row never repeats itself, whatever the pool size", (() => {
   return true;
 })());
 check("sticky facts take their slots first", (() => {
-  const p = poolAt(3);                       // bin night
+  const p = poolAt(3, null, binShift(0));    // bin night
   return HC.fillSlots(p, 2, 99)[0].key === "bins";
 })());
 check("an empty pool asks for nothing rather than throwing",
       HC.fillSlots({ sticky: [], ambient: [] }, 2, 5).length === 0);
+
+/* ---- alert ticker ------------------------------------------------------ *
+ * Against the REAL alert set, read back out of the generated dashboard, so
+ * these run over the definitions in alerts/alerts_def.py rather than a copy
+ * that would drift. The states are synthetic on purpose: an alert set is
+ * mostly quiet by design, and asserting on whatever the house happens to be
+ * doing is how the bin cases above rotted.
+ */
+console.log("\nalert ticker");
+const dashAlerts = JSON.parse(fs.readFileSync(path.join(__dirname, "house_dash.json")))
+  .views[0].cards[0].rows[0].cards[0].alerts;
+
+const tickAt = (over, now) => {
+  const st = JSON.parse(JSON.stringify(hass.states));
+  for (const id in over) {
+    st[id] = Object.assign({ attributes: {} }, st[id], over[id]);
+  }
+  return HC.ticker.active({ states: st }, dashAlerts, now);
+};
+const saying = (list, fragment) =>
+  list.some((a) => String(a.message).indexOf(fragment) >= 0);
+
+check("the whole alert set reaches the card",
+      dashAlerts.length > 20
+   && dashAlerts.some((a) => a.entity === "input_boolean.is_there_mail"),
+      `${dashAlerts.length} alerts`);
+
+/* The bug this card was written for: mail arrived, the phone knew, the page
+   said nothing. */
+check("mail on the flag is an alert",
+      saying(tickAt({ "input_boolean.is_there_mail": { state: "on" } }),
+             "Mail has arrived"));
+check("mail off is not",
+      !saying(tickAt({ "input_boolean.is_there_mail": { state: "off" } }),
+              "Mail has arrived"));
+
+/* trigger_delay is measured off last_changed rather than timed from render,
+   so it is already correct on a page that has just loaded. */
+const garageOpen = (mins) => tickAt({
+  "binary_sensor.sonoff_snzb_04pr2_contact": {
+    state: "on", last_changed: new Date(Date.now() - mins * 60000).toISOString()
+  }
+});
+check("a garage door open two minutes is not yet an alert",
+      !saying(garageOpen(2), "Garage door"));
+check("open past the ten-minute line is",
+      saying(garageOpen(11), "Garage door"));
+
+/* Three entities have to agree before the wind alert is the P1 one. */
+const wind = (over) => tickAt(Object.assign({
+  "input_boolean.wind_action_needed": { state: "on" },
+  "input_boolean.wind_alert_active": { state: "on" },
+  "binary_sensor.zbeacon_ts0203_contact": { state: "off" }
+}, over || {}));
+check("wind up and the blind still down is the P1",
+      saying(wind(), "HIGH WIND"));
+check("the blind going up clears it",
+      !saying(wind({ "binary_sensor.zbeacon_ts0203_contact": { state: "on" } }),
+              "HIGH WIND"));
+/* "not on and not off" -- the two-!= spelling of "offline", since there is no
+   `not in` operator. */
+check("an offline blind sensor asks you to check by eye",
+      saying(wind({ "binary_sensor.zbeacon_ts0203_contact": { state: "unavailable" } }),
+             "check it by eye"));
+
+/* bat_minsoc is a SETTING that reads 10%, not a charge level. Without the
+   exclude list the battery sweep alerts on it forever. */
+check("the FoxESS settings are not mistaken for flat batteries",
+      !tickAt({}).some((a) => String(a.entity).indexOf("sensor.foxess_bat_") === 0),
+      tickAt({}).filter((a) => String(a.entity).indexOf("foxess") >= 0)
+        .map((a) => a.entity).join(" "));
+
+check("the worst alert is the one on screen first", (() => {
+  const list = tickAt({ "input_boolean.is_there_mail": { state: "on" },
+                        "binary_sensor.rpi_power_status": { state: "on" } });
+  const mail = list.findIndex((a) => String(a.message).indexOf("Mail has arrived") >= 0);
+  const volt = list.findIndex((a) => String(a.message).indexOf("power supply problem") >= 0);
+  return volt >= 0 && mail >= 0 && volt < mail;
+})());
+
+check("a numeric operator ignores a state that is not a number",
+      HC.ticker.matches("off", { operator: "<", state: "20" }) === false);
+check("and compares when it can",
+      HC.ticker.matches("11", { operator: "<", state: "20" }) === true);
+
+check("a glob filter expands by entity id, naming what it found", (() => {
+  const st = { "binary_sensor.front_co_alarm_detected":
+               { state: "on", attributes: { friendly_name: "Front door CO" } } };
+  const out = HC.ticker.expand({ states: st },
+    [{ entity_filter: "*co_alarm_detected*", state: "on", message: "CO — {name}" }]);
+  return out.length === 1 && out[0].message === "CO — Front door CO";
+})());
+
+check("a sweep names the entity it matched", (() => {
+  const leak = Object.keys(hass.states).find((id) =>
+    (hass.states[id].attributes || {}).device_class === "moisture");
+  if (!leak) return false;
+  const name = hass.states[leak].attributes.friendly_name || leak;
+  return saying(tickAt({ [leak]: { state: "on" } }), "Water leak — " + name);
+})());
+
+/* The design's bold title plus body comes out of the copy, not a second
+   field -- so the copy has to keep splitting the way it reads. */
+check("a message splits at the em dash",
+      HC.ticker.split("🖴 Pi disk 94% full — time to purge").title === "🖴 Pi disk 94% full"
+   && HC.ticker.split("🖴 Pi disk 94% full — time to purge").body === "time to purge");
+check("a message with no dash is all title",
+      HC.ticker.split("📬 Mail has arrived").title === "📬 Mail has arrived"
+   && HC.ticker.split("📬 Mail has arrived").body === "");
+
+/* ---- soil --------------------------------------------------------------- *
+ * The verdict has to hold two facts at once, and the ordering between them is
+ * the whole point: rain outranks dryness, and wetness outranks rain.
+ */
+console.log("\nsoil");
+const soilTh = { soil_dry: 20, soil_wet: 55 };
+const soilAt = (m, r24, r48) => HC.soilVerdict(m, soilTh, r24, r48);
+
+check("a dry bed with no rain coming says water it",
+      soilAt(8, 0, 0).water === true && soilAt(8, 0, 0).tone === "bad");
+/* The case the rain helpers exist for: telling somebody to water the garden on
+   the morning of a storm is how a dashboard gets ignored. */
+check("a dry bed under a storm says hold off",
+      soilAt(8, 9, 12).water === false && soilAt(8, 9, 12).tone === "cool");
+check("a dry bed with a sprinkle due asks for a short run",
+      soilAt(8, 3, 3).water === "light");
+check("rain the day after tomorrow still means water it lightly today",
+      soilAt(8, 0, 8).water === "light");
+check("a bed in the middle of the band needs no decision",
+      soilAt(35, 0, 0).water === false && soilAt(35, 0, 0).tone === "good");
+/* Wetness outranks the forecast: a waterlogged bed does not care that it is
+   about to be dry. */
+check("a wet bed is left alone whatever the forecast",
+      soilAt(70, 0, 0).water === false && soilAt(70, 0, 0).tone === "cool");
+check("the dry line is the threshold, not a hard-coded 20",
+      HC.soilVerdict(25, { soil_dry: 30, soil_wet: 55 }, 0, 0).water === true
+   && HC.soilVerdict(25, { soil_dry: 20, soil_wet: 55 }, 0, 0).water === false);
+/* A confident verdict with no reading behind it is the one thing this card
+   must never produce. */
+check("no reading produces no verdict rather than a guess from the forecast",
+      soilAt(null, 0, 0).water === null && soilAt(null, 0, 0).tone === "idle");
+
+/* The probe's own dry line is a writable number on the device, so the card
+   must be reading the helper and not the built-in default. */
+check("soil_dry follows the probe's own warning level",
+      th.soil_dry === 30
+   && th.soil_dry__from === "number.a89g12c_arteco_soil_warning",
+      `got ${th.soil_dry} from ${th.soil_dry__from}`);
+
+/* ---- blinds ------------------------------------------------------------- *
+ * Belief and evidence are separate answers and are tested separately. The
+ * failure this guards against is either one quietly becoming the other.
+ */
+console.log("\nblinds");
+const blind = roles.blinds[0];
+const blindAt = (over) => {
+  const st = JSON.parse(JSON.stringify(hass.states));
+  for (const id in over) {
+    st[id] = Object.assign({ attributes: {} }, st[id], over[id]);
+  }
+  return { states: st };
+};
+const sunAt = (elev) => ({ "sun.sun": { state: "above_horizon", attributes: { elevation: elev } } });
+const lux = (room, outside) => Object.assign(
+  { [blind.lux]: { state: String(room), attributes: {} },
+    [blind.outside_lux]: { state: String(outside), attributes: {} } });
+
+check("both blinds are in the map with a meter and a reference",
+      roles.blinds.length === 2
+   && roles.blinds.every((b) => b.cover && b.belief && b.lux && b.outside_lux),
+      JSON.stringify(roles.blinds.map((b) => b.key)));
+
+/* The helper outranks the cover, because the cover cannot be corrected by
+   somebody who has just looked at the blind. */
+check("a set belief beats the cover's memory of the last command",
+      HC.blindBelief(blindAt({ [blind.belief]: { state: "Down" },
+                               [blind.cover]: { state: "open" } }), blind).belief === "Down");
+check("with no belief set, the cover answers and is labelled a guess", (() => {
+  const b = HC.blindBelief(blindAt({ [blind.belief]: { state: "unavailable" },
+                                     [blind.cover]: { state: "open" } }), blind);
+  return b.belief === "Up" && b.source === "cover";
+})());
+check("an unreachable bridge and no belief is Unknown, not Up",
+      HC.blindBelief(blindAt({ [blind.belief]: { state: "unavailable" },
+                               [blind.cover]: { state: "unavailable" } }),
+                     blind).belief === "Unknown");
+/* A cover part way through its travel is not a resting place. */
+check("a cover mid-travel is not read as a position",
+      HC.blindBelief(blindAt({ [blind.belief]: { state: "unknown" },
+                               [blind.cover]: { state: "opening" } }),
+                     blind).belief === "Unknown");
+
+const evAt = (room, outside, elev) =>
+  HC.blindEvidence(blindAt(Object.assign(lux(room, outside), sunAt(elev))),
+                   blind, "sun.sun");
+
+check("a room passing a fifth of the outdoor light reads as up",
+      (evAt(600, 3000, 40) || {}).verdict === "Up");
+check("a room passing almost none of it reads as down",
+      (evAt(20, 3000, 40) || {}).verdict === "Down");
+/* The wide middle band is deliberate -- see blinds_def.py on calibration. */
+check("the middle of the band declines to answer",
+      evAt(90, 3000, 40).verdict === null);
+/* The whole reason for dividing by an outdoor reading: the same room under
+   heavy overcast must not read as shut. */
+check("overcast does not turn an open blind into a shut one",
+      (evAt(120, 600, 40) || {}).verdict === "Up");
+check("cloud passing over moves both readings and changes nothing",
+      (evAt(600, 3000, 40) || {}).verdict === (evAt(200, 1000, 40) || {}).verdict);
+/* Every disqualifier returns null rather than a third verdict. */
+check("after dark there is no evidence at all", evAt(20, 3000, 2) === null);
+check("a dead room meter is not darkness", evAt("unavailable", 3000, 40) === null);
+check("a dead outdoor meter leaves nothing to divide by",
+      evAt(600, "unavailable", 40) === null);
+check("a tiny outdoor reading is not a usable denominator",
+      evAt(4, 20, 40) === null);
 
 console.log(failures ? `\n${failures} FAILED\n` : "\nall passed\n");
 process.exit(failures ? 1 : 0);

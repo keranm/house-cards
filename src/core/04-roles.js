@@ -38,6 +38,11 @@
     context: {},
     batteries: { discover: true, exclude_prefixes: [], exclude: [] },
     lights: { discover: true, exclude: [] },
+    /* Not discovered. Which cover is a blind rather than a curtain, awning or
+       garage door is a judgement, and so is which light meter sits in the same
+       room as it -- see the note at the top about what this file will and will
+       not guess. */
+    blinds: [],
     house: {}
   };
 
@@ -64,7 +69,18 @@
     room_co2:     { default: 800,   unit: "ppm",   helper: null },
     room_co2_bad: { default: 1600,  unit: "ppm",   helper: null },
     room_cool:    { default: 18,    unit: "C",     helper: null },
-    step_goal:    { default: 10000, unit: "steps", helper: null }
+    step_goal:    { default: 10000, unit: "steps", helper: null },
+    /* Soil moisture, as a capacitive probe reports it. Two lines rather than
+       one because they answer different questions: below `soil_dry` the bed
+       wants water, above `soil_wet` watering it does harm, and the whole point
+       of the middle is that it needs no decision at all.
+
+       These are the general figures for garden soil, not measurements from any
+       particular bed. Where the probe carries its own warning level, point
+       `soil_dry` at that number instead -- then the card and the device cannot
+       call the same reading dry and normal. */
+    soil_dry:     { default: 20,    unit: "%",     helper: null },
+    soil_wet:     { default: 55,    unit: "%",     helper: null }
   };
 
   /* The frontend carries the registries on `hass` -- hass.entities,

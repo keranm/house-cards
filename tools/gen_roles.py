@@ -57,6 +57,13 @@ taps = _load("taps", REPO / "garden" / "taps.py")
 # level the alerts ticker stays quiet about.
 pid = _load("pi_def", REPO / "sysmon" / "pi_def.py")
 
+# --- and the blinds out of blinds/. Same argument again, and sharper: the
+# automation that decides a blind was moved by hand reads a room's light meter
+# against an outdoor one, and the card draws its verdict from the same two
+# sensors. If the dashboard picked its own pair, the card and the automation
+# could disagree about which room they are even looking at.
+blinds = _load("blinds_def", REPO / "blinds" / "blinds_def.py")
+
 # --- controllables per room, resolved from the area registry.
 #
 # The expanded room card lists what is switchable in that room. Deriving it
@@ -122,7 +129,7 @@ EXTRA_ROOMS = [dict(r, controls=controllables(r["area"]))
 rooms = [room_from_zone(k, zones.ZONES[k]) for k in HOUSE.ROOM_EXTRA] + EXTRA_ROOMS
 rooms.sort(key=lambda r: r["order"])
 
-ROLES = HOUSE.build_roles(rooms, zones, taps, pid)
+ROLES = HOUSE.build_roles(rooms, zones, taps, pid, blinds)
 
 # The kit itself ships with no house in it -- see src/core/04-roles.js. This
 # map is private to the instance and is injected into the dashboard config by
@@ -134,5 +141,6 @@ print(f"  rooms      {len(rooms)}  ({', '.join(r['title'] for r in rooms)})")
 print(f"  people     {len(ROLES['people'])}")
 print(f"  openings   {len(ROLES['openings'])}")
 print(f"  arrays     {len(ROLES['energy']['arrays'])}")
+print(f"  blinds     {len(ROLES['blinds'])}")
 gaps = [r["title"] for r in rooms if not r["temp"]]
 print(f"  room gaps  {gaps or 'none'}")

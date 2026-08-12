@@ -13,9 +13,14 @@ HERE = pathlib.Path(__file__).parent
 S = {s["entity_id"]: s for s in json.load(open(HERE / "states.json"))}
 
 js = (HERE / "house_roles.json").read_text()
+# The domain list is the guard's whole reach: a role pointing at a domain that
+# is not named here is silently not checked, which is the failure this script
+# exists to prevent. `cover` and `input_select` were missing and the blinds role
+# -- two covers and two helpers -- went unverified when it was added.
 refs = sorted(set(re.findall(
-    r'"((?:sensor|binary_sensor|input_number|input_boolean|input_text|light|'
-    r'switch|person|sun|climate|number|event|calendar)\.[a-z0-9_]+)"', js)))
+    r'"((?:sensor|binary_sensor|input_number|input_boolean|input_text|'
+    r'input_select|input_datetime|light|switch|cover|person|sun|climate|number|'
+    r'event|calendar|todo|vacuum|weather|camera)\.[a-z0-9_]+)"', js)))
 
 # `exclude_prefixes` holds partial ids like "sensor.foxess_", which are not
 # entities and must not be checked as if they were.

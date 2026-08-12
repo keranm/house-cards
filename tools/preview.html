@@ -98,8 +98,28 @@
     return d;
   };
 
-  /* Same order as the handoff. */
-  stub("Alert ticker — existing AlertTicker card, restyled");
+  /* Same order as the handoff.
+     The ticker previews with the real alert set but the dump's real states, so
+     on a quiet day it correctly renders nothing. `?alerts=` stages one, as a
+     comma-separated list of `entity` (meaning on) or `entity=state`:
+
+       ?alerts=input_boolean.is_there_mail
+       ?alerts=input_boolean.wind_action_needed,input_boolean.wind_alert_active,
+               binary_sensor.zbeacon_ts0203_contact=off
+
+     The pairs matter: the alerts worth looking at are the ones that take three
+     entities to become true, and forcing everything to `on` is exactly the
+     combination several of them are written to stay quiet for. */
+  const forced = (new URLSearchParams(location.search).get("alerts") || "")
+    .split(",").map((s) => s.trim()).filter(Boolean);
+  for (const pair of forced) {
+    const eq = pair.indexOf("=");
+    const id = eq < 0 ? pair : pair.slice(0, eq);
+    const state = eq < 0 ? "on" : pair.slice(eq + 1);
+    hass.states[id] = Object.assign({ attributes: {} }, hass.states[id],
+                                    { state, last_changed: new Date(0).toISOString() });
+  }
+  make("hc-ticker", { alerts: window.PREVIEW_ALERTS || [] });
 
   const hero = div("hero");
   make("hc-who-is-home", {}, hero);
@@ -123,9 +143,18 @@
   air.appendChild(right);
   make("hc-energy-now", {}, right);
   make("hc-whats-on", {}, right);
+  make("hc-blinds", { columns: 2 }, right);
 
   make("hc-room-grid", {});
   make("hc-batteries", {});
+
+  /* Off the Home view, but the two cards whose interesting states are hard to
+     reach on the real page: the soil verdict swings on a forecast helper, and
+     the blinds' reconcile strip only appears when the belief is in doubt.
+     `?alerts=` above stages either -- e.g.
+       ?alerts=input_select.summer_blind_state=Up
+       ?alerts=input_number.garden_rain_next_24h=9 */
+  make("hc-soil", { title: "Soil" });
 </script>
 </body>
 </html>
