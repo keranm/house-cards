@@ -3689,11 +3689,19 @@
   .wo-count { display: flex; flex-direction: column; gap: 2px; flex: none; }
   .wo-count .n { font-family: var(--hc-mono); font-size: 26px; font-weight: 600; line-height: 1; }
   .wo-count .of { font-size: 12px; color: var(--hc-muted); }
-  .chips { display: flex; gap: 8px; flex-wrap: wrap; flex: 1; min-width: 0; }
+  /* flex:1 is 1 1 0%, which lets this box shrink to nothing while the chips
+     inside it -- deliberately nowrap, because a light's name should not break
+     mid-word -- keep their own width and simply hang out of it. In a 340px
+     column that put "Lounge Outdoor (Repeater)" straight underneath the All off
+     button. A real basis makes the row wrap the button away instead of
+     overlapping it, and max-width on the chip is the backstop for a name long
+     enough to beat even that. */
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; flex: 1 1 220px; min-width: 0; }
   .chip {
     font-size: 13px; padding: 6px 12px; border-radius: var(--hc-r-pill);
     border: 1px solid var(--hc-border); background: var(--hc-sunken);
     color: var(--hc-faint); cursor: pointer; white-space: nowrap;
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis;
   }
   .chip.on {
     background: var(--hc-green-tint-2); border-color: var(--hc-green-border);
