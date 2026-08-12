@@ -89,16 +89,40 @@
       this._children = [];
       this._slots = [];
 
+      this._rows = [];
+
       cfg.rows.forEach((row) => {
         const cards = row.cards || [];
         const el = HC.el("div", "lrow");
         el.style.gridTemplateColumns = row.columns || `repeat(${cards.length}, minmax(0, 1fr))`;
+        const slots = [];
         cards.forEach((childCfg) => {
           const slot = HC.el("div", "lcol");
           HC.add(el, slot);
-          this._slots.push({ slot, config: childCfg });
+          const entry = { slot, config: childCfg, hidden: false };
+          slots.push(entry);
+          this._slots.push(entry);
         });
+        this._rows.push({ el, slots });
         HC.add(page, el);
+      });
+
+      /* A card that has nothing to say can hide itself, and the row it was in
+         has to close up behind it or the page keeps a 16px gap for something
+         that is not there -- which is exactly the ragged look the container was
+         written to avoid. The ticker is the case that needs this: it is absent
+         on any day nothing is wrong, which is most days.
+         An event rather than measuring heights, because `update()` runs on
+         every state change in the house and reading offsetHeight there would
+         force a reflow several times a second. */
+      page.addEventListener("hc-visibility", (e) => {
+        const entry = this._slots.find((s) => s.slot.contains(e.target));
+        if (!entry) return;
+        entry.hidden = !(e.detail && e.detail.visible);
+        for (const r of this._rows) {
+          if (r.slots.indexOf(entry) < 0) continue;
+          r.el.style.display = r.slots.every((s) => s.hidden) ? "none" : "";
+        }
       });
 
       /* Card helpers load asynchronously, so children arrive a tick after the
