@@ -856,6 +856,21 @@
             tree.classList.add("in");
             const delay = Number(this._config.delay);
             if (isFinite(delay) && delay > 0) tree.style.animationDelay = delay + "ms";
+            /* The class comes off once it has played, and that is not tidiness.
+               `.in` is `animation: hcCardIn .45s ease both`, and `both` keeps
+               the final keyframe applied forever -- including its `transform`,
+               which resolves to an identity matrix rather than to `none`. An
+               element with a transform is a containing block for
+               `position: fixed` descendants, so any card inside this one that
+               opens a full-screen overlay gets anchored to this card instead of
+               to the viewport. That is what stopped the AirGradient card's
+               expanded view from scrolling: its `inset: 0` overlay sized itself
+               to the whole page, so its own `overflow-y: auto` never engaged.
+               Removing the class returns transform to a real `none`. */
+            tree.addEventListener("animationend", () => {
+              tree.classList.remove("in");
+              tree.style.animationDelay = "";
+            }, { once: true });
           }
           HC.add(this._root, tree);
         }
@@ -1894,6 +1909,19 @@
   .lrow { display: grid; gap: var(--gap, 16px); align-items: start; }
   .lrow > * { min-width: 0; }
   .lcol { display: flex; flex-direction: column; gap: var(--gap, 16px); }
+
+  /* ---- edit mode ---------------------------------------------------- *
+     In edit mode a card is a thing you arrange, not a thing you operate. HA
+     enforces that itself on an ordinary view -- hui-card-edit-mode covers each
+     card and swallows the click -- but a panel view holds exactly ONE card,
+     this one, so everything mounted in a slot below stays live and takes the
+     click first. The visible symptom was clicking the AirGradient card in edit
+     mode and getting its expanded view instead of the editor.
+
+     Children are therefore made inert while editing, so the click lands on
+     HA's own affordance for this card. The header stays legible: it is only
+     pointer events that are removed, not the page. */
+  .page.editing .lcol > * { pointer-events: none; }
   @media (max-width: 1000px) {
     .lrow { grid-template-columns: 1fr !important; }
     .page { padding: 16px; }
@@ -1911,7 +1939,17 @@
       if (!config || !Array.isArray(config.rows)) {
         throw new Error("hc-layout: `rows` must be a list");
       }
-      super.setConfig(config);
+      /* Never animated, and not negotiable via yaml. Two reasons. It is the
+         page: fading in a whole screen adds nothing that the staggered entry of
+         the cards inside it does not already do. And an entry animation leaves
+         a transform on the element for the length of the animation, which makes
+         this a containing block for every `position: fixed` descendant --
+         meaning any foreign card in a slot that opens a full-screen overlay
+         (the AirGradient card's expanded view, its tooltip) gets anchored to
+         the page instead of to the viewport, and cannot scroll. The base card
+         now drops the class when it finishes, but the container has no reason
+         to take the risk at all. */
+      super.setConfig(Object.assign({}, config, { animate: false }));
     }
 
     build() {
@@ -1921,6 +1959,7 @@
       style.textContent = LAYOUT_CSS;
 
       const page = HC.el("div", "page");
+      this._page = page;
       if (cfg.max_width) page.style.setProperty("--max", cfg.max_width + "px");
       if (cfg.gap != null) page.style.setProperty("--gap", cfg.gap + "px");
       if (cfg.padding) page.style.setProperty("--pad", cfg.padding);
@@ -2004,10 +2043,33 @@
       this.update();
     }
 
+    /* Are we being edited? There is no property or event for this -- editMode
+       lives on hui-root's `lovelace` object, which a card is not handed -- so
+       the signal is the wrapper HA puts around us: hui-card-options on a panel
+       or masonry view, hui-card-edit-mode on a sections one. Walking up the
+       composed tree reads no geometry and forces no layout, so it is safe to
+       do on every update; entering edit mode rebuilds the view anyway, but
+       checking each time means we cannot miss it if that ever stops being true. */
+    _editing() {
+      let n = this;
+      for (let i = 0; i < 24 && n; i++) {
+        const tag = n.tagName;
+        if (tag === "HUI-CARD-OPTIONS" || tag === "HUI-CARD-EDIT-MODE") return true;
+        const root = n.getRootNode ? n.getRootNode() : null;
+        n = n.parentElement || (root && root.host) || null;
+      }
+      return false;
+    }
+
     update() {
       if (!this._hass) return;
       for (const el of this._children) {
         if (el.hass !== this._hass) el.hass = this._hass;
+      }
+      const editing = this._editing();
+      if (editing !== this._editing_) {
+        this._editing_ = editing;
+        HC.setClass(this._page, "editing", editing);
       }
     }
 

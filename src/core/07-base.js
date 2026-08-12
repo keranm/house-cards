@@ -67,6 +67,21 @@
             tree.classList.add("in");
             const delay = Number(this._config.delay);
             if (isFinite(delay) && delay > 0) tree.style.animationDelay = delay + "ms";
+            /* The class comes off once it has played, and that is not tidiness.
+               `.in` is `animation: hcCardIn .45s ease both`, and `both` keeps
+               the final keyframe applied forever -- including its `transform`,
+               which resolves to an identity matrix rather than to `none`. An
+               element with a transform is a containing block for
+               `position: fixed` descendants, so any card inside this one that
+               opens a full-screen overlay gets anchored to this card instead of
+               to the viewport. That is what stopped the AirGradient card's
+               expanded view from scrolling: its `inset: 0` overlay sized itself
+               to the whole page, so its own `overflow-y: auto` never engaged.
+               Removing the class returns transform to a real `none`. */
+            tree.addEventListener("animationend", () => {
+              tree.classList.remove("in");
+              tree.style.animationDelay = "";
+            }, { once: true });
           }
           HC.add(this._root, tree);
         }
