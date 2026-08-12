@@ -6516,13 +6516,18 @@
   .bl.unsure { border-color: var(--hc-amber-border); background: var(--hc-amber-tint); }
   .bl.clash  { border-color: var(--hc-amber-border); background: var(--hc-amber-tint); }
 
-  .bl-top { display: flex; align-items: center; gap: 10px; }
+  /* The evidence pill drops to its own line rather than eating the name. Two
+     tiles in a 590px column give each header about 240px of usable width, and
+     "NO LIGHT READ" beside a shrinking name truncated "Summer's blind" to
+     "Summer...". A name is the one thing on this tile that must stay readable,
+     so it claims a floor and the pill wraps under it when there is no room. */
+  .bl-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .bl-icon { width: 34px; height: 34px; border-radius: 50%; flex: none;
              display: grid; place-items: center;
              background: var(--hc-rule); color: var(--hc-muted); cursor: pointer; }
   .bl.up .bl-icon   { background: var(--hc-blue-tint); color: var(--hc-blue-ink); }
   .bl.down .bl-icon { background: var(--hc-green-tint); color: var(--hc-green-deep); }
-  .bl-name { font-size: 15px; font-weight: 600; flex: 1; min-width: 0; }
+  .bl-name { font-size: 15px; font-weight: 600; flex: 1 1 120px; min-width: 120px; }
 
   .bl-state { font-size: 22px; font-weight: 600; line-height: 1.1; }
   .bl-since { font-size: 13px; color: var(--hc-muted); }

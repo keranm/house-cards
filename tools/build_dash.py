@@ -114,14 +114,23 @@ page = {
 
         {"columns": "340px 1fr", "cards": [
             stack(AIR_OUTSIDE, AIR_INSIDE),
-            # The blinds sit under What's on because they belong to the same
-            # question -- what can I operate from here, right now. They are on
-            # the family page rather than only the AirCon one because the people
-            # who move them are the two kids and whoever is putting them to bed,
-            # none of whom go looking for an air-conditioning tab.
-            stack(card("hc-energy-now", ["energy"]),
-                  card("hc-whats-on", ["lights"]),
-                  card("hc-blinds", ["blinds", "house"], columns=2)),
+            card("hc-energy-now", ["energy"]),
+        ]},
+
+        # Two rows rather than two tall stacks, because `.lrow` is a grid with
+        # `align-items: start` -- so cards in the SAME row are guaranteed to
+        # start at the same y, and cards in two independent stacks are only ever
+        # aligned by luck. The air pair is taller than the energy card, which is
+        # exactly the gap What's on now fills.
+        #
+        # The blinds sit beside What's on because they answer the same question:
+        # what can I operate from here, right now. They are on the family page
+        # rather than only the AirCon one because the people who move them are
+        # the two kids and whoever is putting them to bed, none of whom go
+        # looking for an air-conditioning tab.
+        {"columns": "340px 1fr", "cards": [
+            card("hc-whats-on", ["lights"]),
+            card("hc-blinds", ["blinds", "house"], columns=2),
         ]},
 
         {"cards": [card("hc-room-grid", ["rooms"], columns=4)]},
