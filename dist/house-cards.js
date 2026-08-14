@@ -1915,23 +1915,12 @@
      events on children in edit mode and simply made them dead, because a panel
      view has no per-card affordance underneath to fall through to.
 
-     The affordance is added instead of taken away. HA draws a pencil on cards
-     it can address in the dashboard config; the cards in these slots are built
-     by this container at runtime, so HA has no address for them and draws
-     nothing. This draws the pencil HA cannot -- and it opens HA's OWN edit
-     dialog, not a substitute. See _openEditor. */
+     The affordance is HA's own element, hui-card-edit-mode, wrapped around each
+     child while editing -- the same overlay, pencil and overflow menu a
+     sections view puts on every card. There is deliberately no styling for it
+     here: anything written in this file would be a second, different-looking
+     way to edit a card, which is the thing to avoid. See _wrap. */
   .lcol { position: relative; }
-  .hc-edit-pin { display: none; }
-  .page.editing .lcol > .hc-edit-pin {
-    display: flex; position: absolute; top: 8px; right: 8px; z-index: 4;
-    align-items: center; justify-content: center;
-    width: 36px; height: 36px; padding: 0; border-radius: 50%; cursor: pointer;
-    border: none; background: var(--secondary-background-color, #e8eae9);
-    color: var(--primary-text-color, #212121);
-    box-shadow: 0 2px 6px rgba(0,0,0,.22);
-  }
-  .page.editing .lcol > .hc-edit-pin:hover { filter: brightness(.94); }
-  .page.editing .lcol > .hc-edit-pin svg { width: 22px; height: 22px; fill: currentColor; }
 
   @media (max-width: 1000px) {
     .lrow { grid-template-columns: 1fr !important; }
@@ -1939,11 +1928,6 @@
   }
   @media (max-width: 600px) { .page { padding: 12px 12px 40px; } }
   `;
-
-  /* mdi:pencil, the same glyph HA puts on its own edit affordance. */
-  const PENCIL = "M20.71,7.04C21.1,6.65 21.1,6 20.71,5.63L18.37,3.29C18,2.9 "
-               + "17.35,2.9 16.96,3.29L15.12,5.12L18.87,8.87M3,17.25V21H6.75L17.81,"
-               + "9.93L14.06,6.18L3,17.25Z";
 
   class Layout extends HC.Card {
     constructor() {
@@ -2007,22 +1991,8 @@
         cards.forEach((childCfg, ci) => {
           const slot = HC.el("div", "lcol");
           HC.add(el, slot);
-          const entry = { slot, config: childCfg, hidden: false, ri, ci, el: null };
-          /* Built once and hidden by CSS off edit mode, so entering edit mode
-             costs no DOM work -- and the button exists before the child does,
-             which matters because children arrive asynchronously. */
-          const pin = HC.el("button", "hc-edit-pin");
-          pin.title = "Edit card";
-          pin.setAttribute("aria-label", "Edit card");
-          const ico = HC.svg("svg", { viewBox: "0 0 24 24" });
-          HC.add(ico, HC.svg("path", { d: PENCIL }));
-          HC.add(pin, ico);
-          pin.addEventListener("click", (e) => {
-            e.stopPropagation();
-            e.preventDefault();
-            this._openEditor(entry);
-          });
-          HC.add(slot, pin);
+          const entry = { slot, config: childCfg, hidden: false, ri, ci,
+                          el: null, wrap: null };
           slots.push(entry);
           this._slots.push(entry);
         });
@@ -2080,6 +2050,13 @@
       }
       /* Children created after the first hass arrived need it now. */
       this.update();
+      /* Children arrive a tick after the page, so if the dashboard was already
+         in edit mode when this was built, _syncEditing has already run and
+         found nothing to wrap. */
+      if (this._editing_) {
+        const ctx = this._lovelaceCtx();
+        if (ctx) for (const entry of this._slots) this._wrap(entry, ctx.lovelace);
+      }
     }
 
     /* Everything about editing hangs off Lovelace's own `lovelace` object:
@@ -2153,17 +2130,22 @@
           dialogParams: {
             lovelaceConfig: ctx.lovelace.config,
             cardConfig: entry.config,
-            saveCardConfig: (cfg) => this._persist(entry, cfg)
+            saveCardConfig: (cfg) => this._mutate((rows) => {
+              if (!rows[entry.ri] || !rows[entry.ri].cards) {
+                throw new Error("the saved config no longer has row " + entry.ri);
+              }
+              rows[entry.ri].cards[entry.ci] = cfg;
+            })
           }
         }
       }));
     }
 
-    /* Write the child's new config back into the dashboard.
-       The edit belongs to a card nested inside this one, so what gets saved is
-       the whole lovelace config with one leaf replaced. `path` on the wrapper
-       addresses THIS card; the row and column index address the child. */
-    async _persist(entry, childCfg) {
+    /* Every write goes through here: edit, duplicate, delete.
+       A change to a card nested inside this one is still a change to the whole
+       dashboard, so the whole config is cloned, our own `rows` are handed to
+       the caller to alter, and the result is saved. */
+    async _mutate(alter) {
       const ctx = this._lovelaceCtx();
       const lovelace = ctx && ctx.lovelace;
       if (!lovelace || !lovelace.config || typeof lovelace.saveConfig !== "function") {
@@ -2173,11 +2155,9 @@
       const config = JSON.parse(JSON.stringify(lovelace.config));
       const self = this._locate(config, ctx.path);
       if (!self) throw new Error("could not find this hc-layout in the dashboard config");
-      if (!self.rows || !self.rows[entry.ri] || !self.rows[entry.ri].cards) {
-        throw new Error("the saved config no longer has row " + entry.ri);
-      }
-      self.rows[entry.ri].cards[entry.ci] = childCfg;
+      if (!Array.isArray(self.rows)) throw new Error("the saved config has no rows");
 
+      alter(self.rows);
       await lovelace.saveConfig(config);
       /* HA rebuilds the card from the saved config, so nothing is updated by
          hand here -- doing so would put the page a step ahead of what is
@@ -2224,15 +2204,92 @@
     /* Called from update(), so it tracks edit mode for free on the next state
        change -- and once on a timer after build, because toggling edit mode is
        not itself a state change and a quiet house could sit there for seconds
-       with no pencil showing. */
+       with no affordance showing. */
     _syncEditing() {
       if (!this._page) return;
       const ctx = this._lovelaceCtx();
       const editing = !!(ctx && ctx.lovelace.editMode);
-      if (editing !== this._editing_) {
-        this._editing_ = editing;
-        HC.setClass(this._page, "editing", editing);
+      if (editing === this._editing_) return;
+      this._editing_ = editing;
+      HC.setClass(this._page, "editing", editing);
+      for (const entry of this._slots) {
+        if (editing) this._wrap(entry, ctx.lovelace);
+        else this._unwrap(entry);
       }
+    }
+
+    /* HA's own edit affordance, around our own children.
+       hui-card-edit-mode is the element a sections view puts around every card:
+       the dimming overlay, the centred pencil, the overflow menu with Edit,
+       Duplicate, Copy, Cut and Delete. Using it is why editing a card in here
+       looks and behaves like editing a card anywhere else, and why there is no
+       hc-* styling involved in any of it.
+
+       It does no work itself -- it fires ll-edit-card, ll-duplicate-card,
+       ll-delete-card and friends, each carrying a `path`, and something above
+       it acts on them. Above it here is us. The events are caught ON THE
+       WRAPPER and stopped dead: the path we hand it addresses a slot in this
+       container, which means nothing to the view above, and letting one escape
+       would have HA act on a card of that index in its own config. Stopping
+       them is a correctness requirement, not tidiness. */
+    _wrap(entry, lovelace) {
+      if (entry.wrap || !entry.el) return;
+      if (!customElements.get("hui-card-edit-mode")) {
+        /* Only in edit mode does HA load the chunk that defines it. If it is
+           somehow absent, leave the card alone rather than invent a button:
+           an un-editable card is better than a second, different-looking way
+           to edit one. */
+        customElements.whenDefined("hui-card-edit-mode").then(() => {
+          if (this._editing_) this._wrap(entry, lovelace);
+        });
+        return;
+      }
+
+      const wrap = document.createElement("hui-card-edit-mode");
+      wrap.hass = this._hass;
+      wrap.lovelace = lovelace;
+      /* Ours to interpret, since nothing else ever sees it. */
+      wrap.path = ["hc-layout", entry.ri, entry.ci];
+      /* Copy and Cut move a card between containers through a clipboard we
+         cannot reach -- it is module state inside HA's own editor. Offering
+         them would offer a button that silently does nothing. */
+      wrap.noMove = true;
+
+      const stop = (e) => { e.stopPropagation(); e.stopImmediatePropagation(); };
+      wrap.addEventListener("ll-edit-card", (e) => {
+        stop(e);
+        this._openEditor(entry);
+      });
+      wrap.addEventListener("ll-duplicate-card", (e) => {
+        stop(e);
+        this._mutate((rows) => {
+          rows[entry.ri].cards.splice(entry.ci + 1, 0,
+            JSON.parse(JSON.stringify(entry.config)));
+        });
+      });
+      wrap.addEventListener("ll-delete-card", (e) => {
+        stop(e);
+        this._mutate((rows) => {
+          rows[entry.ri].cards.splice(entry.ci, 1);
+          /* A row with no cards left is a gap the page keeps for nothing. */
+          if (!rows[entry.ri].cards.length) rows.splice(entry.ri, 1);
+        });
+      });
+      /* Anything else HA's element may grow: better inert than wrong. */
+      for (const name of ["ll-copy-card", "ll-move-card", "ll-move-card-to-position"]) {
+        wrap.addEventListener(name, stop);
+      }
+
+      entry.slot.insertBefore(wrap, entry.el);
+      wrap.appendChild(entry.el);
+      entry.wrap = wrap;
+    }
+
+    _unwrap(entry) {
+      if (!entry.wrap) return;
+      if (entry.el) entry.slot.insertBefore(entry.el, entry.wrap);
+      entry.wrap.remove();
+      entry.wrap = null;
     }
 
     getCardSize() { return 20; }

@@ -37,6 +37,26 @@ def main():
         browser = p.chromium.launch(headless=not HEADED)
         page = browser.new_page(viewport={"width": 1600, "height": 1100})
 
+        # A long-lived token in localStorage is how the frontend stays logged
+        # in. Injected as an init script rather than evaluated after a goto:
+        # an unauthenticated load redirects to the login page, and the eval
+        # then lands in a context that no longer exists.
+        page.add_init_script(
+            """(() => {
+                 try {
+                   localStorage.setItem("hassTokens", JSON.stringify(TOKENS));
+                 } catch (e) {}
+               })()""".replace("TOKENS", json.dumps({
+                "access_token": token(),
+                "token_type": "Bearer",
+                "expires_in": 1800,
+                "hassUrl": URL,
+                "clientId": None,
+                "refresh_token": "",
+                "expires": 4102444800000,
+            }))
+        )
+
         # Serve the working tree, not what HACS last published.
         body = BUNDLE.read_text()
         page.route(
@@ -48,20 +68,41 @@ def main():
             ),
         )
 
-        # A long-lived token in localStorage is how the frontend stays logged
-        # in; expires is far enough out that it never tries to refresh.
-        page.goto(URL + "/lovelace/0", wait_until="domcontentloaded")
-        page.evaluate(
-            """([url, tok]) => localStorage.setItem("hassTokens", JSON.stringify({
-                 access_token: tok, token_type: "Bearer", expires_in: 1800,
-                 hassUrl: url, clientId: null, refresh_token: "",
-                 expires: Date.now() + 365 * 24 * 3600 * 1000
-               }))""",
-            [URL, token()],
+        # Boot the app on a plain page first. Going straight to the dashboard
+        # sometimes lands on /auth/authorize before the injected token has been
+        # read, and the auth page then owns the session for good.
+        page.goto(URL + "/", wait_until="domcontentloaded")
+        page.wait_for_function(
+            """() => {
+                 const dig = (h, t) => { const r = h && (h.shadowRoot || h);
+                                         return r ? r.querySelector(t) : null; };
+                 return !!dig(dig(document, "home-assistant"), "home-assistant-main");
+               }""",
+            timeout=45000,
         )
 
         page.goto(URL + "/the-house/home?edit=1", wait_until="domcontentloaded")
-        page.wait_for_timeout(9000)
+        # Wait for the container to exist AND to have wrapped its children,
+        # rather than guessing at a sleep.
+        page.wait_for_function(
+            """() => {
+                 const findDeep = (n, t, d) => {
+                   if (!n || d > 12) return null;
+                   const r = n.shadowRoot || n;
+                   const h = r.querySelector ? r.querySelector(t) : null;
+                   if (h) return h;
+                   for (const k of (r.querySelectorAll ? r.querySelectorAll("*") : [])) {
+                     if (k.shadowRoot) { const x = findDeep(k, t, d + 1); if (x) return x; }
+                   }
+                   return null;
+                 };
+                 const L = findDeep(document.body, "hc-layout", 0);
+                 return !!(L && L.shadowRoot &&
+                           L.shadowRoot.querySelector("hui-card-edit-mode"));
+               }""",
+            timeout=60000,
+        )
+        page.wait_for_timeout(1500)
 
         probe = page.evaluate(
             """() => {
@@ -109,11 +150,14 @@ def main():
                 layoutFound: !!layout,
                 walk: ctx,
                 hops: hops.slice(0, 12),
-                pins: layout && layout.shadowRoot
-                  ? layout.shadowRoot.querySelectorAll(".hc-edit-pin").length : 0,
-                pinsVisible: layout && layout.shadowRoot
-                  ? [...layout.shadowRoot.querySelectorAll(".hc-edit-pin")]
-                      .filter(b => b.offsetParent !== null).length : 0,
+                wrappers: layout && layout.shadowRoot
+                  ? layout.shadowRoot.querySelectorAll("hui-card-edit-mode").length : 0,
+                wrappersWithUi: layout && layout.shadowRoot
+                  ? [...layout.shadowRoot.querySelectorAll("hui-card-edit-mode")]
+                      .filter(w => w.shadowRoot &&
+                                   w.shadowRoot.querySelector(".card-overlay .control")).length
+                  : 0,
+                editModeDefined: !!customElements.get("hui-card-edit-mode"),
                 editingClass: layout && layout.shadowRoot
                   ? !!layout.shadowRoot.querySelector(".page.editing") : false,
                 dialogDefined: !!customElements.get("hui-dialog-edit-card"),
@@ -122,6 +166,52 @@ def main():
             }"""
         )
         print(json.dumps(probe, indent=2))
+
+        # What HA's wrapper actually renders. Printed every run because the
+        # interesting failures are "the element is there and does nothing":
+        # an overlay with no size, a button that is the overflow menu rather
+        # than the pencil, pointer-events off until hover.
+        anatomy = page.evaluate(
+            """() => {
+              const findDeep = (n, t, d) => {
+                if (!n || d > 12) return null;
+                const r = n.shadowRoot || n;
+                const h = r.querySelector ? r.querySelector(t) : null;
+                if (h) return h;
+                for (const k of (r.querySelectorAll ? r.querySelectorAll("*") : [])) {
+                  if (k.shadowRoot) { const x = findDeep(k, t, d + 1); if (x) return x; }
+                }
+                return null;
+              };
+              const L = findDeep(document.body, "hc-layout", 0);
+              const w = L && L.shadowRoot
+                ? L.shadowRoot.querySelector("hui-card-edit-mode") : null;
+              if (!w) return { error: "no wrapper" };
+              const sr = w.shadowRoot;
+              const cs = getComputedStyle(w);
+              const overlay = sr ? sr.querySelector(".overlay") : null;
+              return {
+                rect: w.getBoundingClientRect().toJSON(),
+                display: cs.display,
+                props: { path: JSON.stringify(w.path), noMove: w.noMove,
+                         hiddenOverlay: w.hiddenOverlay,
+                         lovelace: !!w.lovelace, hass: !!w.hass },
+                overlay: overlay ? {
+                  rect: overlay.getBoundingClientRect().toJSON(),
+                  opacity: getComputedStyle(overlay).opacity,
+                  pointerEvents: getComputedStyle(overlay).pointerEvents
+                } : null,
+                controls: sr
+                  ? [...sr.querySelectorAll("ha-icon-button, button, ha-md-button-menu")]
+                      .map(b => ({ tag: b.tagName, cls: b.className,
+                                   label: b.getAttribute("aria-label") || b.title || "",
+                                   rect: b.getBoundingClientRect().toJSON() }))
+                  : [],
+                html: sr ? sr.innerHTML.slice(0, 700) : null
+              };
+            }"""
+        )
+        print("wrapper anatomy:", json.dumps(anatomy, indent=2)[:2000])
 
         page.screenshot(path=str(SHOTS / "edit-mode.png"))
 
@@ -140,14 +230,20 @@ def main():
               };
               const layout = findDeep(document.body, "hc-layout", 0);
               if (!layout || !layout.shadowRoot) return "no layout";
-              const pins = [...layout.shadowRoot.querySelectorAll(".hc-edit-pin")];
+              const wraps = [...layout.shadowRoot.querySelectorAll("hui-card-edit-mode")];
               const want = WANT;
-              const match = (b) => !want ||
-                (b.parentElement && b.parentElement.querySelector(want));
-              const pin = pins.find(b => b.offsetParent !== null && match(b));
-              if (!pin) return "no visible pin" + (want ? " containing " + want : "");
-              pin.click();
-              return "clicked pin " + (pins.indexOf(pin) + 1) + " of " + pins.length;
+              const match = (w) => !want || w.querySelector(want);
+              const wrap = wraps.find(w => w.offsetParent !== null && match(w));
+              if (!wrap) return "no visible wrapper" + (want ? " containing " + want : "");
+              // Click HA's own pencil, inside its shadow root -- not a synthetic
+              // event, so this exercises the element as a person would.
+              // The pencil is `div.control`; the ha-icon-button in there is the
+              // overflow menu's trigger, which is a different affordance.
+              const btn = wrap.shadowRoot &&
+                wrap.shadowRoot.querySelector(".card-overlay .control");
+              if (!btn) return "wrapper has no .control in its shadow root";
+              btn.click();
+              return "clicked pencil " + (wraps.indexOf(wrap) + 1) + " of " + wraps.length;
             }""".replace("WANT", json.dumps(WANT))
         )
         print("open:", opened)
@@ -195,7 +291,9 @@ def main():
               const probeCfg = JSON.parse(JSON.stringify(entry.config));
               probeCfg.__probe = "dry-run";
 
-              return Promise.resolve(layout._persist(entry, probeCfg))
+              return Promise.resolve(layout._mutate((rows) => {
+                       rows[entry.ri].cards[entry.ci] = probeCfg;
+                     }))
                 .then(() => {
                   ctx.lovelace.saveConfig = real;
                   if (!captured) return { error: "saveConfig was never called" };
