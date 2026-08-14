@@ -1918,45 +1918,20 @@
      The affordance is added instead of taken away. HA draws a pencil on cards
      it can address in the dashboard config; the cards in these slots are built
      by this container at runtime, so HA has no address for them and draws
-     nothing -- their editors exist and are never invoked. This draws the
-     pencil HA cannot, and invokes the card's OWN getConfigElement(), which is
-     the same element HA would open on an ordinary view. */
+     nothing. This draws the pencil HA cannot -- and it opens HA's OWN edit
+     dialog, not a substitute. See _openEditor. */
   .lcol { position: relative; }
   .hc-edit-pin { display: none; }
   .page.editing .lcol > .hc-edit-pin {
-    display: flex; position: absolute; top: 6px; right: 6px; z-index: 4;
-    align-items: center; justify-content: center; gap: 6px;
-    height: 30px; padding: 0 12px; border-radius: 15px; cursor: pointer;
-    border: 1px solid var(--hc-border); background: var(--hc-surface);
-    color: var(--hc-ink); font: inherit; font-size: 12px; font-weight: 600;
-    box-shadow: 0 2px 8px rgba(0,0,0,.18);
+    display: flex; position: absolute; top: 8px; right: 8px; z-index: 4;
+    align-items: center; justify-content: center;
+    width: 36px; height: 36px; padding: 0; border-radius: 50%; cursor: pointer;
+    border: none; background: var(--secondary-background-color, #e8eae9);
+    color: var(--primary-text-color, #212121);
+    box-shadow: 0 2px 6px rgba(0,0,0,.22);
   }
-  .page.editing .lcol > .hc-edit-pin:hover { background: var(--hc-page); }
-
-  .hc-dlg-wrap {
-    position: fixed; inset: 0; z-index: 9; display: flex;
-    align-items: center; justify-content: center; padding: 24px;
-    background: rgba(0,0,0,.4);
-  }
-  .hc-dlg {
-    display: flex; flex-direction: column; width: min(720px, 100%);
-    max-height: min(84vh, 900px); border-radius: var(--hc-r-hero);
-    background: var(--hc-surface); color: var(--hc-ink); overflow: hidden;
-    box-shadow: 0 24px 64px rgba(0,0,0,.34);
-  }
-  .hc-dlg-head { padding: 18px 22px; font-size: 18px; font-weight: 600;
-                 border-bottom: 1px solid var(--hc-rule); }
-  .hc-dlg-body { padding: 18px 22px; overflow: auto; flex: 1 1 auto; }
-  .hc-dlg-note { font-size: 14px; color: var(--hc-ink-2); }
-  .hc-dlg-err { color: var(--hc-red-ink); font-size: 13px; padding-top: 10px; }
-  .hc-dlg-foot { display: flex; justify-content: flex-end; gap: 10px;
-                 padding: 14px 22px; border-top: 1px solid var(--hc-rule); }
-  .hc-btn { height: 36px; padding: 0 18px; border-radius: 18px; cursor: pointer;
-            border: 1px solid var(--hc-border); background: transparent;
-            color: var(--hc-ink); font: inherit; font-size: 14px; font-weight: 600; }
-  .hc-btn.primary { background: var(--hc-ink); color: var(--hc-surface);
-                    border-color: var(--hc-ink); }
-  .hc-btn[disabled] { opacity: .45; cursor: default; }
+  .page.editing .lcol > .hc-edit-pin:hover { filter: brightness(.94); }
+  .page.editing .lcol > .hc-edit-pin svg { width: 22px; height: 22px; fill: currentColor; }
 
   @media (max-width: 1000px) {
     .lrow { grid-template-columns: 1fr !important; }
@@ -1964,6 +1939,11 @@
   }
   @media (max-width: 600px) { .page { padding: 12px 12px 40px; } }
   `;
+
+  /* mdi:pencil, the same glyph HA puts on its own edit affordance. */
+  const PENCIL = "M20.71,7.04C21.1,6.65 21.1,6 20.71,5.63L18.37,3.29C18,2.9 "
+               + "17.35,2.9 16.96,3.29L15.12,5.12L18.87,8.87M3,17.25V21H6.75L17.81,"
+               + "9.93L14.06,6.18L3,17.25Z";
 
   class Layout extends HC.Card {
     constructor() {
@@ -2031,7 +2011,12 @@
           /* Built once and hidden by CSS off edit mode, so entering edit mode
              costs no DOM work -- and the button exists before the child does,
              which matters because children arrive asynchronously. */
-          const pin = HC.el("button", "hc-edit-pin", "Edit card");
+          const pin = HC.el("button", "hc-edit-pin");
+          pin.title = "Edit card";
+          pin.setAttribute("aria-label", "Edit card");
+          const ico = HC.svg("svg", { viewBox: "0 0 24 24" });
+          HC.add(ico, HC.svg("path", { d: PENCIL }));
+          HC.add(pin, ico);
           pin.addEventListener("click", (e) => {
             e.stopPropagation();
             e.preventDefault();
@@ -2137,87 +2122,41 @@
       return n2 && n2.lovelace ? { lovelace: n2.lovelace, path: null } : null;
     }
 
-    /* The card's own editor, in a dialog this container owns.
-       Deliberately NOT hui-card-element-editor: that is HA's nested-card
-       editor and it is not available to custom cards (probed 2026-08-11, HA
-       2026.8.1, see editor.md). It is not needed either -- getConfigElement()
-       is a static on the card class, the element it returns is registered by
-       the card's own bundle, and it is the very element HA would open. All
-       that was ever missing on a nested child is something to call it. */
+    /* HA's OWN edit dialog, not a copy of it.
+       `hui-dialog-edit-card` takes a card config and a save callback --
+       `cardConfig` and `saveCardConfig` -- so it does not need the card to have
+       an address in the dashboard config, which is exactly the thing a card
+       nested in here does not have. That is the whole trick, and it means the
+       dialog that opens is the one HA opens everywhere else: the card's visual
+       editor when it ships one, the YAML code editor when it does not, and the
+       per-card tabs when the slot holds a stack.
+
+       An earlier version built a dialog here and mounted the card's
+       getConfigElement() in it by hand. It worked only for cards with a visual
+       editor, gave every other card a dead end reading "no visual editor", and
+       looked like nothing else in HA. Deleted.
+
+       dialogImport waits on the element rather than importing it: the chunk
+       that defines it is HA's, and it is already loaded by the time a
+       dashboard is in edit mode. */
     async _openEditor(entry) {
-      const el = entry.el;
-      const ctor = el && el.constructor;
-
-      let editor = null, err = null;
-      if (ctor && typeof ctor.getConfigElement === "function") {
-        try {
-          editor = await ctor.getConfigElement();
-        } catch (e) {
-          err = String(e);
+      const ctx = this._lovelaceCtx();
+      if (!ctx) {
+        throw new Error("hc-layout: no lovelace object, cannot open the editor");
+      }
+      this.dispatchEvent(new CustomEvent("show-dialog", {
+        bubbles: true,
+        composed: true,
+        detail: {
+          dialogTag: "hui-dialog-edit-card",
+          dialogImport: () => customElements.whenDefined("hui-dialog-edit-card"),
+          dialogParams: {
+            lovelaceConfig: ctx.lovelace.config,
+            cardConfig: entry.config,
+            saveCardConfig: (cfg) => this._persist(entry, cfg)
+          }
         }
-      }
-
-      if (!editor) {
-        this._dialog(entry.config.type || "Card", HC.el("div", "hc-dlg-note",
-          err || "This card ships no visual editor. Edit it in the dashboard YAML."));
-        return;
-      }
-
-      /* Latest wins. The editor emits config-changed on every keystroke and
-         hands back the WHOLE config each time, so there is nothing to merge. */
-      let next = entry.config;
-      editor.addEventListener("config-changed", (e) => {
-        if (e.detail && e.detail.config) next = e.detail.config;
-      });
-      editor.hass = this._hass;
-      if (typeof editor.setConfig === "function") editor.setConfig(entry.config);
-
-      this._dialog(entry.config.type || "Card", editor, async (setErr) => {
-        try {
-          await this._persist(entry, next);
-          return true;
-        } catch (e) {
-          setErr(String(e && e.message ? e.message : e));
-          return false;
-        }
-      });
-    }
-
-    /* Own dialog rather than ha-dialog: no dependency on an HA internal, and
-       the container has already made sure it is not a containing block for a
-       fixed-position child, so `inset: 0` means the viewport. */
-    _dialog(title, body, onSave) {
-      const wrap = HC.el("div", "hc-dlg-wrap");
-      const sheet = HC.el("div", "hc-dlg");
-      const errLine = HC.el("div", "hc-dlg-err");
-      errLine.style.display = "none";
-
-      const foot = HC.el("div", "hc-dlg-foot");
-      const cancel = HC.el("button", "hc-btn", onSave ? "Cancel" : "Close");
-      cancel.addEventListener("click", () => wrap.remove());
-      HC.add(foot, cancel);
-
-      if (onSave) {
-        const save = HC.el("button", "hc-btn primary", "Save");
-        save.addEventListener("click", async () => {
-          save.disabled = true;
-          const ok = await onSave((msg) => {
-            HC.setText(errLine, msg);
-            errLine.style.display = "";
-          });
-          /* Left open on failure, with the reason, so the edit is not lost. */
-          if (ok) wrap.remove(); else save.disabled = false;
-        });
-        HC.add(foot, save);
-      }
-
-      const bodyEl = HC.el("div", "hc-dlg-body");
-      HC.add(bodyEl, body, errLine);
-      HC.add(sheet, HC.el("div", "hc-dlg-head", title), bodyEl, foot);
-      HC.add(wrap, sheet);
-      wrap.addEventListener("click", (e) => { if (e.target === wrap) wrap.remove(); });
-      HC.add(this._root, wrap);
-      return wrap;
+      }));
     }
 
     /* Write the child's new config back into the dashboard.

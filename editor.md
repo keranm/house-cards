@@ -36,15 +36,31 @@ has had a major version bump.
 | `ha-icon-picker` | yes |
 | `ha-sortable` | yes |
 | `ha-expansion-panel` | yes |
-| `hui-card-element-editor` | **no** — stays undefined even after forcing HA to load its editor chunk |
+| `hui-card-element-editor` | **yes, in edit mode** — see correction below |
 
 They are *not* lazily withheld the way folklore says. An earlier probe reported
 everything as false; that probe had run before the frontend finished booting and
 was wrong.
 
-The one genuine absence is `hui-card-element-editor`, which is what you would need
-to edit cards *nested inside* another card. That is `hc-layout`, and it is why the
-recommendation below routes around it rather than through it.
+**Correction, 2026-08-14.** The `hui-card-element-editor` row above was wrong, and
+it cost a day. Re-probed with `tools/probe_edit.py`, which drives the real
+dashboard in a real browser: on `/the-house/home?edit=1` both
+`hui-card-element-editor` and `hui-dialog-edit-card` are defined. The original
+probe ran on a dashboard that was not in edit mode, so HA had no reason to have
+loaded its editor chunk, and "undefined right now" was written down as "not
+available".
+
+It turned out not to matter which way that row went, because nested editing does
+not need either element imported by us. `hui-dialog-edit-card` takes
+`cardConfig` plus a `saveCardConfig` callback — no path into the dashboard config
+required — so a container can hand it any child config it likes and be handed the
+edited one back. That is what `hc-layout` now does, and the dialog that opens is
+HA's own: visual editor where the card ships one, YAML code editor where it does
+not, per-card tabs where the slot holds a stack.
+
+The lesson worth keeping is the method, not the fact. Do not write down what the
+frontend can do based on a probe whose conditions were not the conditions the
+feature runs in. `probe_edit.py` exists so that checking takes a minute.
 
 ### None of the 17 cards has any editor hook
 

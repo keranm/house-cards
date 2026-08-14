@@ -25,3 +25,5 @@ tools/.deployed_*.json
 # imports the facts from here, so the published repo describes the machinery
 # without describing the household.
 tools/house_private.py
+# Screenshots from tools/probe_edit.py -- regenerate, do not commit.
+tools/shots/
