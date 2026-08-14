@@ -1910,13 +1910,54 @@
   .lrow > * { min-width: 0; }
   .lcol { display: flex; flex-direction: column; gap: var(--gap, 16px); }
 
-  /* A child's clicks are the child's business. There was briefly a rule here
-     that killed pointer events on children in edit mode, on the theory that a
-     card being arranged should not also be operable. It made the cards dead
-     instead: HA gives a panel view no per-card affordance to fall through to,
-     so the click landed on nothing at all. A container mounts children and
-     stays out of their way -- whatever a card does with a click, in edit mode
-     or out of it, it does. */
+  /* ---- editing a child ----------------------------------------------- *
+     A card's own clicks stay its own -- an earlier attempt killed pointer
+     events on children in edit mode and simply made them dead, because a panel
+     view has no per-card affordance underneath to fall through to.
+
+     The affordance is added instead of taken away. HA draws a pencil on cards
+     it can address in the dashboard config; the cards in these slots are built
+     by this container at runtime, so HA has no address for them and draws
+     nothing -- their editors exist and are never invoked. This draws the
+     pencil HA cannot, and invokes the card's OWN getConfigElement(), which is
+     the same element HA would open on an ordinary view. */
+  .lcol { position: relative; }
+  .hc-edit-pin { display: none; }
+  .page.editing .lcol > .hc-edit-pin {
+    display: flex; position: absolute; top: 6px; right: 6px; z-index: 4;
+    align-items: center; justify-content: center; gap: 6px;
+    height: 30px; padding: 0 12px; border-radius: 15px; cursor: pointer;
+    border: 1px solid var(--hc-border); background: var(--hc-surface);
+    color: var(--hc-ink); font: inherit; font-size: 12px; font-weight: 600;
+    box-shadow: 0 2px 8px rgba(0,0,0,.18);
+  }
+  .page.editing .lcol > .hc-edit-pin:hover { background: var(--hc-page); }
+
+  .hc-dlg-wrap {
+    position: fixed; inset: 0; z-index: 9; display: flex;
+    align-items: center; justify-content: center; padding: 24px;
+    background: rgba(0,0,0,.4);
+  }
+  .hc-dlg {
+    display: flex; flex-direction: column; width: min(720px, 100%);
+    max-height: min(84vh, 900px); border-radius: var(--hc-r-hero);
+    background: var(--hc-surface); color: var(--hc-ink); overflow: hidden;
+    box-shadow: 0 24px 64px rgba(0,0,0,.34);
+  }
+  .hc-dlg-head { padding: 18px 22px; font-size: 18px; font-weight: 600;
+                 border-bottom: 1px solid var(--hc-rule); }
+  .hc-dlg-body { padding: 18px 22px; overflow: auto; flex: 1 1 auto; }
+  .hc-dlg-note { font-size: 14px; color: var(--hc-ink-2); }
+  .hc-dlg-err { color: var(--hc-red-ink); font-size: 13px; padding-top: 10px; }
+  .hc-dlg-foot { display: flex; justify-content: flex-end; gap: 10px;
+                 padding: 14px 22px; border-top: 1px solid var(--hc-rule); }
+  .hc-btn { height: 36px; padding: 0 18px; border-radius: 18px; cursor: pointer;
+            border: 1px solid var(--hc-border); background: transparent;
+            color: var(--hc-ink); font: inherit; font-size: 14px; font-weight: 600; }
+  .hc-btn.primary { background: var(--hc-ink); color: var(--hc-surface);
+                    border-color: var(--hc-ink); }
+  .hc-btn[disabled] { opacity: .45; cursor: default; }
+
   @media (max-width: 1000px) {
     .lrow { grid-template-columns: 1fr !important; }
     .page { padding: 16px; }
@@ -1934,6 +1975,10 @@
       if (!config || !Array.isArray(config.rows)) {
         throw new Error("hc-layout: `rows` must be a list");
       }
+      /* Kept verbatim, before `animate` is forced in below. Saving a child's
+         edit means finding THIS card in the dashboard config, and the copy
+         there is the one the author wrote. */
+      this._raw = JSON.parse(JSON.stringify(config));
       /* Never animated, and not negotiable via yaml. Two reasons. It is the
          page: fading in a whole screen adds nothing that the staggered entry of
          the cards inside it does not already do. And an entry animation leaves
@@ -1954,6 +1999,7 @@
       style.textContent = LAYOUT_CSS;
 
       const page = HC.el("div", "page");
+      this._page = page;
       if (cfg.max_width) page.style.setProperty("--max", cfg.max_width + "px");
       if (cfg.gap != null) page.style.setProperty("--gap", cfg.gap + "px");
       if (cfg.padding) page.style.setProperty("--pad", cfg.padding);
@@ -1973,15 +2019,25 @@
 
       this._rows = [];
 
-      cfg.rows.forEach((row) => {
+      cfg.rows.forEach((row, ri) => {
         const cards = row.cards || [];
         const el = HC.el("div", "lrow");
         el.style.gridTemplateColumns = row.columns || `repeat(${cards.length}, minmax(0, 1fr))`;
         const slots = [];
-        cards.forEach((childCfg) => {
+        cards.forEach((childCfg, ci) => {
           const slot = HC.el("div", "lcol");
           HC.add(el, slot);
-          const entry = { slot, config: childCfg, hidden: false };
+          const entry = { slot, config: childCfg, hidden: false, ri, ci, el: null };
+          /* Built once and hidden by CSS off edit mode, so entering edit mode
+             costs no DOM work -- and the button exists before the child does,
+             which matters because children arrive asynchronously. */
+          const pin = HC.el("button", "hc-edit-pin", "Edit card");
+          pin.addEventListener("click", (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            this._openEditor(entry);
+          });
+          HC.add(slot, pin);
           slots.push(entry);
           this._slots.push(entry);
         });
@@ -2018,7 +2074,8 @@
 
     async _mountChildren() {
       const helpers = await window.loadCardHelpers();
-      for (const { slot, config } of this._slots) {
+      for (const entry of this._slots) {
+        const { slot, config } = entry;
         let el;
         try {
           el = helpers.createCardElement(config);
@@ -2031,16 +2088,176 @@
         }
         if (this._hass) el.hass = this._hass;
         this._children.push(el);
+        entry.el = el;
         slot.appendChild(el);
       }
       /* Children created after the first hass arrived need it now. */
       this.update();
     }
 
+    /* The wrapper HA puts around us while the dashboard is being edited, or
+       null when it is not. There is no property or event for edit mode -- it
+       lives on hui-root's `lovelace` object, which a card is never handed --
+       so the wrapper is the signal, and it is also where `lovelace` and this
+       card's own `path` can be read from when a child edit has to be saved.
+       Walking the composed tree reads no geometry and forces no layout. */
+    _editHost() {
+      let n = this;
+      for (let i = 0; i < 24 && n; i++) {
+        const tag = n.tagName;
+        if (tag === "HUI-CARD-OPTIONS" || tag === "HUI-CARD-EDIT-MODE") return n;
+        const root = n.getRootNode ? n.getRootNode() : null;
+        n = n.parentElement || (root && root.host) || null;
+      }
+      return null;
+    }
+
+    /* The card's own editor, in a dialog this container owns.
+       Deliberately NOT hui-card-element-editor: that is HA's nested-card
+       editor and it is not available to custom cards (probed 2026-08-11, HA
+       2026.8.1, see editor.md). It is not needed either -- getConfigElement()
+       is a static on the card class, the element it returns is registered by
+       the card's own bundle, and it is the very element HA would open. All
+       that was ever missing on a nested child is something to call it. */
+    async _openEditor(entry) {
+      const el = entry.el;
+      const ctor = el && el.constructor;
+
+      let editor = null, err = null;
+      if (ctor && typeof ctor.getConfigElement === "function") {
+        try {
+          editor = await ctor.getConfigElement();
+        } catch (e) {
+          err = String(e);
+        }
+      }
+
+      if (!editor) {
+        this._dialog(entry.config.type || "Card", HC.el("div", "hc-dlg-note",
+          err || "This card ships no visual editor. Edit it in the dashboard YAML."));
+        return;
+      }
+
+      /* Latest wins. The editor emits config-changed on every keystroke and
+         hands back the WHOLE config each time, so there is nothing to merge. */
+      let next = entry.config;
+      editor.addEventListener("config-changed", (e) => {
+        if (e.detail && e.detail.config) next = e.detail.config;
+      });
+      editor.hass = this._hass;
+      if (typeof editor.setConfig === "function") editor.setConfig(entry.config);
+
+      this._dialog(entry.config.type || "Card", editor, async (setErr) => {
+        try {
+          await this._persist(entry, next);
+          return true;
+        } catch (e) {
+          setErr(String(e && e.message ? e.message : e));
+          return false;
+        }
+      });
+    }
+
+    /* Own dialog rather than ha-dialog: no dependency on an HA internal, and
+       the container has already made sure it is not a containing block for a
+       fixed-position child, so `inset: 0` means the viewport. */
+    _dialog(title, body, onSave) {
+      const wrap = HC.el("div", "hc-dlg-wrap");
+      const sheet = HC.el("div", "hc-dlg");
+      const errLine = HC.el("div", "hc-dlg-err");
+      errLine.style.display = "none";
+
+      const foot = HC.el("div", "hc-dlg-foot");
+      const cancel = HC.el("button", "hc-btn", onSave ? "Cancel" : "Close");
+      cancel.addEventListener("click", () => wrap.remove());
+      HC.add(foot, cancel);
+
+      if (onSave) {
+        const save = HC.el("button", "hc-btn primary", "Save");
+        save.addEventListener("click", async () => {
+          save.disabled = true;
+          const ok = await onSave((msg) => {
+            HC.setText(errLine, msg);
+            errLine.style.display = "";
+          });
+          /* Left open on failure, with the reason, so the edit is not lost. */
+          if (ok) wrap.remove(); else save.disabled = false;
+        });
+        HC.add(foot, save);
+      }
+
+      const bodyEl = HC.el("div", "hc-dlg-body");
+      HC.add(bodyEl, body, errLine);
+      HC.add(sheet, HC.el("div", "hc-dlg-head", title), bodyEl, foot);
+      HC.add(wrap, sheet);
+      wrap.addEventListener("click", (e) => { if (e.target === wrap) wrap.remove(); });
+      HC.add(this._root, wrap);
+      return wrap;
+    }
+
+    /* Write the child's new config back into the dashboard.
+       The edit belongs to a card nested inside this one, so what gets saved is
+       the whole lovelace config with one leaf replaced. `path` on the wrapper
+       addresses THIS card; the row and column index address the child. */
+    async _persist(entry, childCfg) {
+      const host = this._editHost();
+      const lovelace = host && host.lovelace;
+      if (!lovelace || !lovelace.config || typeof lovelace.saveConfig !== "function") {
+        throw new Error("cannot reach the dashboard config to save (not in edit mode?)");
+      }
+
+      const config = JSON.parse(JSON.stringify(lovelace.config));
+      const self = this._locate(config, host.path);
+      if (!self) throw new Error("could not find this hc-layout in the dashboard config");
+      if (!self.rows || !self.rows[entry.ri] || !self.rows[entry.ri].cards) {
+        throw new Error("the saved config no longer has row " + entry.ri);
+      }
+      self.rows[entry.ri].cards[entry.ci] = childCfg;
+
+      await lovelace.saveConfig(config);
+      /* HA rebuilds the card from the saved config, so nothing is updated by
+         hand here -- doing so would put the page a step ahead of what is
+         stored, which is the state that makes a save look like it worked. */
+    }
+
+    /* By path first, which is exact. HA hands the wrapper `[view, card]` on a
+       panel or masonry view and `[view, section, card]` on a sections one. If
+       that shape ever changes, fall back to finding the one card in the config
+       that is byte-identical to ours -- and refuse if there is more than one,
+       since writing to the wrong copy is worse than not saving. */
+    _locate(config, path) {
+      if (Array.isArray(path) && config.views && config.views[path[0]]) {
+        const view = config.views[path[0]];
+        let card = null;
+        if (path.length >= 3 && view.sections && view.sections[path[1]]) {
+          card = (view.sections[path[1]].cards || [])[path[2]];
+        } else if (path.length >= 2 && view.cards) {
+          card = view.cards[path[1]];
+        }
+        if (card && card.type === "custom:hc-layout") return card;
+      }
+
+      const want = JSON.stringify(this._raw);
+      const hits = [];
+      const walk = (o) => {
+        if (!o || typeof o !== "object") return;
+        if (Array.isArray(o)) { o.forEach(walk); return; }
+        if (o.type === "custom:hc-layout" && JSON.stringify(o) === want) hits.push(o);
+        for (const k of Object.keys(o)) walk(o[k]);
+      };
+      walk(config);
+      return hits.length === 1 ? hits[0] : null;
+    }
+
     update() {
       if (!this._hass) return;
       for (const el of this._children) {
         if (el.hass !== this._hass) el.hass = this._hass;
+      }
+      const editing = !!this._editHost();
+      if (editing !== this._editing_) {
+        this._editing_ = editing;
+        HC.setClass(this._page, "editing", editing);
       }
     }
 
