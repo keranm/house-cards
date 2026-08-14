@@ -332,6 +332,22 @@ VIEWS = [home_view, aircon_view, garden_view, security_view, robots_view, pi_vie
 dash = {"views": VIEWS}
 
 out = HERE / "house_dash.json"
+
+# Regenerating throws away anything pulled back from Home Assistant. That is
+# usually what is wanted -- this file is an output -- but not when someone has
+# just spent an afternoon arranging the dashboard in HA and run pull_dash.py to
+# save it. The snapshot is written by both deploy and pull, so a house_dash.json
+# that differs from it holds hand edits that only exist here.
+snapshot = HERE / ".deployed_the-house.json"
+if out.exists() and snapshot.exists() and "--force" not in sys.argv:
+    import json as _json
+    if _json.loads(out.read_text()) != _json.loads(snapshot.read_text()):
+        sys.exit(
+            f"tools/{out.name} holds edits pulled from Home Assistant that this\n"
+            f"script would overwrite. Fold them into this generator first, or:\n\n"
+            f"  discard them: python3 tools/build_dash.py --force\n"
+        )
+
 out.write_text(json.dumps(dash, indent=2))
 print(f"wrote tools/{out.name}  {len(VIEWS)} views: "
       + ", ".join(v["title"] for v in VIEWS))

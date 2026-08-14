@@ -26,6 +26,12 @@ if TARGET in FORBIDDEN or not TARGET:
 DASH = HERE / "house_dash.json"
 ROLES = HERE / "house_roles.json"
 
+# What this script last wrote, or what pull_dash.py last read back. The guard
+# further down compares the live config against it to tell a dashboard nobody
+# has touched from one that has been edited by hand in HA.
+SNAPSHOT = HERE / f".deployed_{TARGET}.json"
+FORCE = "--force" in sys.argv
+
 # house_dash.json is generated FROM house_roles.json by build_dash.py, and a
 # deploy of a stale one fails in the worst way available: the bundle ships, the
 # cards load, everything reports success, and one card quietly runs on last
@@ -60,6 +66,7 @@ else:
     print(f"dashboard /{TARGET}/ exists")
 
 # --- back up whatever is there now ---------------------------------------
+current = None
 try:
     current = w.cmd(type="lovelace/config", url_path=TARGET)
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -68,6 +75,31 @@ try:
     print(f"backed up existing config -> tools/{backup.name}")
 except RuntimeError:
     print("no existing config at that path (new dashboard)")
+
+# --- do not overwrite an edit made in HA ---------------------------------
+# This dashboard is meant to be edited from both ends: regenerated here, and
+# rearranged in Home Assistant by a person -- including through the editors
+# that hc-layout now opens for cards nested in it. A deploy is a full replace,
+# so without this check any hand edit lives only until the next one.
+#
+# SNAPSHOT is what was last written by this script or pulled by pull_dash.py.
+# If the live config still matches it, nothing has been touched in HA and a
+# deploy loses nothing. If it does not match, someone edited in HA and those
+# changes are not in the repo yet.
+if current is not None and SNAPSHOT.exists() and not FORCE:
+    snap = json.loads(SNAPSHOT.read_text())
+    if json.dumps(current, sort_keys=True) != json.dumps(snap, sort_keys=True):
+        sys.exit(
+            f"/{TARGET}/ has been edited in Home Assistant since the last deploy.\n"
+            f"Deploying now would discard those edits.\n\n"
+            f"  keep them:    python3 tools/pull_dash.py   (then rebuild if needed)\n"
+            f"  discard them: python3 tools/deploy_dash.py --force\n\n"
+            f"The live config was backed up to tools/{backup.name} either way."
+        )
+elif current is not None and not SNAPSHOT.exists():
+    # First run since the guard existed: no snapshot to compare against, so
+    # there is nothing trustworthy to refuse on. Say so rather than pretend.
+    print("no deploy snapshot yet -- cannot tell whether /the-house/ has hand edits")
 
 # --- write ---------------------------------------------------------------
 w.cmd(type="lovelace/config/save", url_path=TARGET, config=dash)
@@ -80,6 +112,12 @@ back = w.cmd(type="lovelace/config", url_path=TARGET)
 sent = json.dumps(dash, sort_keys=True)
 got = json.dumps(back, sort_keys=True)
 print("round-trip identical" if sent == got else "ROUND-TRIP DIFFERS (HA rewrote something)")
+
+# Record what is now live, so the next deploy can tell a hand edit from its own
+# handiwork. Written from the read-back rather than from `dash`, because if HA
+# rewrote anything on the way in, HA's version is what a later comparison will
+# be looking at.
+SNAPSHOT.write_text(json.dumps(back, indent=1))
 
 types = []
 
