@@ -286,27 +286,56 @@ def main():
               let captured = null;
               ctx.lovelace.saveConfig = (cfg) => { captured = cfg; return Promise.resolve(); };
 
-              const entry = layout._slots.find(s => s.config.type === "vertical-stack")
-                         || layout._slots[0];
+              // Prefer a card in a STACKED column (si set): its address goes
+              // through the nested-list branch of _at, which the single-card
+              // branch would not exercise.
+              const entry = layout._slots.find(s => s.si != null) || layout._slots[0];
               const probeCfg = JSON.parse(JSON.stringify(entry.config));
               probeCfg.__probe = "dry-run";
 
+              // Go through _at, the same addressing the real save uses.
+              // Writing rows[ri].cards[ci] directly here is what the probe used
+              // to do, and it silently replaced a whole stacked column with one
+              // card -- a bug in the test that read exactly like a bug in the
+              // card.
               return Promise.resolve(layout._mutate((rows) => {
-                       rows[entry.ri].cards[entry.ci] = probeCfg;
+                       const at = layout._at(rows, entry);
+                       at.list[at.i] = probeCfg;
                      }))
                 .then(() => {
                   ctx.lovelace.saveConfig = real;
                   if (!captured) return { error: "saveConfig was never called" };
                   const rows = captured.views[0].cards[0].rows;
-                  const leaf = rows[entry.ri].cards[entry.ci];
+                  const column = rows[entry.ri].cards[entry.ci];
+                  const leaf = entry.si == null ? column : column[entry.si];
+                  const live = ctx.lovelace.config.views[0].cards[0].rows;
+                  // Nothing outside the one leaf may change: compare every row
+                  // except the one that was written to.
+                  let others = true;
+                  for (let i = 0; i < live.length; i++) {
+                    if (i === entry.ri) continue;
+                    if (JSON.stringify(rows[i]) !== JSON.stringify(live[i])) others = false;
+                  }
                   return {
                     saveCalled: true,
-                    leafGotProbe: leaf.__probe === "dry-run",
-                    leafType: leaf.type,
+                    stacked: entry.si != null,
+                    leafGotProbe: !!leaf && leaf.__probe === "dry-run",
+                    leafType: leaf && leaf.type,
+                    siblingIntact: entry.si != null
+                      ? JSON.stringify(column[1 - entry.si]) ===
+                        JSON.stringify(live[entry.ri].cards[entry.ci][1 - entry.si])
+                      : null,
                     viewsIntact: captured.views.length,
-                    // Nothing outside the one leaf may change.
-                    othersUntouched: JSON.stringify(rows[0]) ===
-                      JSON.stringify(ctx.lovelace.config.views[0].cards[0].rows[0])
+                    othersUntouched: others,
+                    debug: {
+                      ri: entry.ri, ci: entry.ci, si: entry.si,
+                      columnIsArray: Array.isArray(column),
+                      columnShape: Array.isArray(column)
+                        ? column.map(c => c && c.type)
+                        : (column && column.type),
+                      rowCount: rows.length,
+                      liveColumnIsArray: Array.isArray(live[entry.ri].cards[entry.ci])
+                    }
                   };
                 })
                 .catch(e => { ctx.lovelace.saveConfig = real; return { error: String(e) }; });

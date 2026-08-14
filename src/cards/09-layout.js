@@ -124,13 +124,25 @@
         const el = HC.el("div", "lrow");
         el.style.gridTemplateColumns = row.columns || `repeat(${cards.length}, minmax(0, 1fr))`;
         const slots = [];
-        cards.forEach((childCfg, ci) => {
+        cards.forEach((columnCfg, ci) => {
+          /* A column is one card, or a LIST of cards stacked down it.
+             The list form exists because the alternative is a vertical-stack,
+             and a stack is one card as far as everything else is concerned:
+             one edit affordance, one editor with the real cards behind tabs.
+             Two cards sitting above each other are two cards, and each gets
+             its own pencil. `.lcol` was always a flex column with a gap, so
+             stacking them here costs no layout. */
           const slot = HC.el("div", "lcol");
           HC.add(el, slot);
-          const entry = { slot, config: childCfg, hidden: false, ri, ci,
-                          el: null, wrap: null };
-          slots.push(entry);
-          this._slots.push(entry);
+          const list = Array.isArray(columnCfg) ? columnCfg : [columnCfg];
+          list.forEach((childCfg, si) => {
+            const entry = {
+              slot, config: childCfg, hidden: false, el: null, wrap: null,
+              ri, ci, si: Array.isArray(columnCfg) ? si : null
+            };
+            slots.push(entry);
+            this._slots.push(entry);
+          });
         });
         this._rows.push({ el, slots });
         HC.add(page, el);
@@ -145,7 +157,11 @@
          every state change in the house and reading offsetHeight there would
          force a reflow several times a second. */
       page.addEventListener("hc-visibility", (e) => {
-        const entry = this._slots.find((s) => s.slot.contains(e.target));
+        /* By the card element, not by the slot: a stacked column has several
+           entries sharing one slot, and matching on the slot would credit the
+           first of them with whatever the third one said. */
+        const entry = this._slots.find((s) => s.el && (s.el === e.target || s.el.contains(e.target)))
+                   || this._slots.find((s) => s.slot.contains(e.target));
         if (!entry) return;
         entry.hidden = !(e.detail && e.detail.visible);
         for (const r of this._rows) {
@@ -267,14 +283,29 @@
             lovelaceConfig: ctx.lovelace.config,
             cardConfig: entry.config,
             saveCardConfig: (cfg) => this._mutate((rows) => {
-              if (!rows[entry.ri] || !rows[entry.ri].cards) {
-                throw new Error("the saved config no longer has row " + entry.ri);
-              }
-              rows[entry.ri].cards[entry.ci] = cfg;
+              const at = this._at(rows, entry);
+              at.list[at.i] = cfg;
             })
           }
         }
       }));
+    }
+
+    /* Where a child sits in the saved config: the array holding it and its
+       index in that array. A column is either a card or a list of cards, so
+       this is the one place that has to know which. */
+    _at(rows, entry) {
+      const row = rows[entry.ri];
+      if (!row || !Array.isArray(row.cards)) {
+        throw new Error("the saved config no longer has row " + entry.ri);
+      }
+      if (entry.si == null) return { list: row.cards, i: entry.ci };
+      const column = row.cards[entry.ci];
+      if (!Array.isArray(column)) {
+        throw new Error("row " + entry.ri + " column " + entry.ci
+                      + " is no longer a stacked column");
+      }
+      return { list: column, i: entry.si };
     }
 
     /* Every write goes through here: edit, duplicate, delete.
@@ -399,16 +430,22 @@
       wrap.addEventListener("ll-duplicate-card", (e) => {
         stop(e);
         this._mutate((rows) => {
-          rows[entry.ri].cards.splice(entry.ci + 1, 0,
-            JSON.parse(JSON.stringify(entry.config)));
+          const at = this._at(rows, entry);
+          at.list.splice(at.i + 1, 0, JSON.parse(JSON.stringify(entry.config)));
         });
       });
       wrap.addEventListener("ll-delete-card", (e) => {
         stop(e);
         this._mutate((rows) => {
-          rows[entry.ri].cards.splice(entry.ci, 1);
-          /* A row with no cards left is a gap the page keeps for nothing. */
-          if (!rows[entry.ri].cards.length) rows.splice(entry.ri, 1);
+          const at = this._at(rows, entry);
+          at.list.splice(at.i, 1);
+          /* An empty column, then an empty row, are gaps the page would keep
+             for nothing. Collapse from the inside out. */
+          const row = rows[entry.ri];
+          if (entry.si != null && !row.cards[entry.ci].length) {
+            row.cards.splice(entry.ci, 1);
+          }
+          if (!row.cards.length) rows.splice(entry.ri, 1);
         });
       });
       /* Anything else HA's element may grow: better inert than wrong. */

@@ -112,8 +112,13 @@ page = {
                          "context", "rooms", "house"])]},
         {"cards": [card("hc-step-leaderboard", ["people"])]},
 
+        # A LIST, not a stack. Both forms put the two air cards one above the
+        # other in the left column and look identical on the page, but a
+        # vertical-stack is a single card to everything else: one edit pencil,
+        # one editor with the real cards behind tabs. They are two cards, so
+        # they are two entries, and each gets its own affordance.
         {"columns": "340px 1fr", "cards": [
-            stack(AIR_OUTSIDE, AIR_INSIDE),
+            [AIR_OUTSIDE, AIR_INSIDE],
             card("hc-energy-now", ["energy"]),
         ]},
 
