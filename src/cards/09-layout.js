@@ -46,18 +46,13 @@
   .lrow > * { min-width: 0; }
   .lcol { display: flex; flex-direction: column; gap: var(--gap, 16px); }
 
-  /* ---- edit mode ---------------------------------------------------- *
-     In edit mode a card is a thing you arrange, not a thing you operate. HA
-     enforces that itself on an ordinary view -- hui-card-edit-mode covers each
-     card and swallows the click -- but a panel view holds exactly ONE card,
-     this one, so everything mounted in a slot below stays live and takes the
-     click first. The visible symptom was clicking the AirGradient card in edit
-     mode and getting its expanded view instead of the editor.
-
-     Children are therefore made inert while editing, so the click lands on
-     HA's own affordance for this card. The header stays legible: it is only
-     pointer events that are removed, not the page. */
-  .page.editing .lcol > * { pointer-events: none; }
+  /* A child's clicks are the child's business. There was briefly a rule here
+     that killed pointer events on children in edit mode, on the theory that a
+     card being arranged should not also be operable. It made the cards dead
+     instead: HA gives a panel view no per-card affordance to fall through to,
+     so the click landed on nothing at all. A container mounts children and
+     stays out of their way -- whatever a card does with a click, in edit mode
+     or out of it, it does. */
   @media (max-width: 1000px) {
     .lrow { grid-template-columns: 1fr !important; }
     .page { padding: 16px; }
@@ -95,7 +90,6 @@
       style.textContent = LAYOUT_CSS;
 
       const page = HC.el("div", "page");
-      this._page = page;
       if (cfg.max_width) page.style.setProperty("--max", cfg.max_width + "px");
       if (cfg.gap != null) page.style.setProperty("--gap", cfg.gap + "px");
       if (cfg.padding) page.style.setProperty("--pad", cfg.padding);
@@ -179,33 +173,10 @@
       this.update();
     }
 
-    /* Are we being edited? There is no property or event for this -- editMode
-       lives on hui-root's `lovelace` object, which a card is not handed -- so
-       the signal is the wrapper HA puts around us: hui-card-options on a panel
-       or masonry view, hui-card-edit-mode on a sections one. Walking up the
-       composed tree reads no geometry and forces no layout, so it is safe to
-       do on every update; entering edit mode rebuilds the view anyway, but
-       checking each time means we cannot miss it if that ever stops being true. */
-    _editing() {
-      let n = this;
-      for (let i = 0; i < 24 && n; i++) {
-        const tag = n.tagName;
-        if (tag === "HUI-CARD-OPTIONS" || tag === "HUI-CARD-EDIT-MODE") return true;
-        const root = n.getRootNode ? n.getRootNode() : null;
-        n = n.parentElement || (root && root.host) || null;
-      }
-      return false;
-    }
-
     update() {
       if (!this._hass) return;
       for (const el of this._children) {
         if (el.hass !== this._hass) el.hass = this._hass;
-      }
-      const editing = this._editing();
-      if (editing !== this._editing_) {
-        this._editing_ = editing;
-        HC.setClass(this._page, "editing", editing);
       }
     }
 
