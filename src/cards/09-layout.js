@@ -202,6 +202,8 @@
       /* Card helpers load asynchronously, so children arrive a tick after the
          page does. The slots are already in the grid, so nothing jumps. */
       this._mountChildren();
+      setTimeout(() => this._syncEditing(), 0);
+      setTimeout(() => this._syncEditing(), 500);
 
       const root = HC.el("div");
       HC.add(root, style, page);
@@ -231,21 +233,44 @@
       this.update();
     }
 
-    /* The wrapper HA puts around us while the dashboard is being edited, or
-       null when it is not. There is no property or event for edit mode -- it
-       lives on hui-root's `lovelace` object, which a card is never handed --
-       so the wrapper is the signal, and it is also where `lovelace` and this
-       card's own `path` can be read from when a child edit has to be saved.
+    /* Everything about editing hangs off Lovelace's own `lovelace` object:
+       `editMode` says whether the dashboard is being edited, `config` is what
+       is stored, and `saveConfig` is how a change is written. A card is never
+       handed it, so it has to be found.
+
+       Found by PROPERTY, not by tag name. An earlier version looked for a
+       HUI-CARD-OPTIONS or HUI-CARD-EDIT-MODE ancestor, which is a guess about
+       markup HA is free to change and which pins the whole feature to that
+       guess being right. Every element on the way up that knows about editing
+       carries `lovelace` -- hui-card-options, hui-panel-view, hui-root -- so
+       the property is both the more reliable signal and the thing actually
+       needed. `path`, when a wrapper happens to have one, is a bonus that
+       makes saving exact.
+
        Walking the composed tree reads no geometry and forces no layout. */
-    _editHost() {
-      let n = this;
-      for (let i = 0; i < 24 && n; i++) {
-        const tag = n.tagName;
-        if (tag === "HUI-CARD-OPTIONS" || tag === "HUI-CARD-EDIT-MODE") return n;
+    _lovelaceCtx() {
+      let n = this, path = null;
+      for (let i = 0; i < 40 && n; i++) {
+        if (path == null && Array.isArray(n.path)) path = n.path;
+        if (n.lovelace && typeof n.lovelace === "object") {
+          return { lovelace: n.lovelace, path };
+        }
         const root = n.getRootNode ? n.getRootNode() : null;
         n = n.parentElement || (root && root.host) || null;
       }
-      return null;
+
+      /* Last resort: descend to hui-root from the top. Only reached if the
+         card is mounted somewhere the walk up cannot see a lovelace from --
+         a preview, or a wrapper that stops the chain. */
+      const dig = (host, tag) => {
+        const r = host && (host.shadowRoot || host);
+        return r ? r.querySelector(tag) : null;
+      };
+      let n2 = dig(document, "home-assistant");
+      n2 = dig(n2, "home-assistant-main");
+      n2 = dig(n2, "ha-panel-lovelace");
+      n2 = dig(n2, "hui-root");
+      return n2 && n2.lovelace ? { lovelace: n2.lovelace, path: null } : null;
     }
 
     /* The card's own editor, in a dialog this container owns.
@@ -336,14 +361,14 @@
        the whole lovelace config with one leaf replaced. `path` on the wrapper
        addresses THIS card; the row and column index address the child. */
     async _persist(entry, childCfg) {
-      const host = this._editHost();
-      const lovelace = host && host.lovelace;
+      const ctx = this._lovelaceCtx();
+      const lovelace = ctx && ctx.lovelace;
       if (!lovelace || !lovelace.config || typeof lovelace.saveConfig !== "function") {
-        throw new Error("cannot reach the dashboard config to save (not in edit mode?)");
+        throw new Error("cannot reach the dashboard config to save");
       }
 
       const config = JSON.parse(JSON.stringify(lovelace.config));
-      const self = this._locate(config, host.path);
+      const self = this._locate(config, ctx.path);
       if (!self) throw new Error("could not find this hc-layout in the dashboard config");
       if (!self.rows || !self.rows[entry.ri] || !self.rows[entry.ri].cards) {
         throw new Error("the saved config no longer has row " + entry.ri);
@@ -390,7 +415,17 @@
       for (const el of this._children) {
         if (el.hass !== this._hass) el.hass = this._hass;
       }
-      const editing = !!this._editHost();
+      this._syncEditing();
+    }
+
+    /* Called from update(), so it tracks edit mode for free on the next state
+       change -- and once on a timer after build, because toggling edit mode is
+       not itself a state change and a quiet house could sit there for seconds
+       with no pencil showing. */
+    _syncEditing() {
+      if (!this._page) return;
+      const ctx = this._lovelaceCtx();
+      const editing = !!(ctx && ctx.lovelace.editMode);
       if (editing !== this._editing_) {
         this._editing_ = editing;
         HC.setClass(this._page, "editing", editing);
