@@ -167,6 +167,31 @@ def main():
         )
         print(json.dumps(probe, indent=2))
 
+        # Bring the target on screen before measuring or hovering: a card below
+        # the fold gets a hover at coordinates outside the viewport, no overlay
+        # appears, and the screenshot proves nothing.
+        page.evaluate(
+            """(want) => {
+              const findDeep = (n, t, d) => {
+                if (!n || d > 12) return null;
+                const r = n.shadowRoot || n;
+                const h = r.querySelector ? r.querySelector(t) : null;
+                if (h) return h;
+                for (const k of (r.querySelectorAll ? r.querySelectorAll("*") : [])) {
+                  if (k.shadowRoot) { const x = findDeep(k, t, d + 1); if (x) return x; }
+                }
+                return null;
+              };
+              const L = findDeep(document.body, "hc-layout", 0);
+              const all = L && L.shadowRoot
+                ? [...L.shadowRoot.querySelectorAll("hui-card-edit-mode")] : [];
+              const w = (want ? all.find(x => x.querySelector(want)) : null) || all[0];
+              if (w) w.scrollIntoView({ block: "center" });
+            }""",
+            WANT,
+        )
+        page.wait_for_timeout(800)
+
         # What HA's wrapper actually renders. Printed every run because the
         # interesting failures are "the element is there and does nothing":
         # an overlay with no size, a button that is the overflow menu rather
@@ -184,18 +209,32 @@ def main():
                 return null;
               };
               const L = findDeep(document.body, "hc-layout", 0);
-              const w = L && L.shadowRoot
-                ? L.shadowRoot.querySelector("hui-card-edit-mode") : null;
+              // Target the same wrapper --pin selects, not merely the first:
+              // the first is often the ticker, which is hidden and 0px tall.
+              const want = WANTSEL;
+              const all = L && L.shadowRoot
+                ? [...L.shadowRoot.querySelectorAll("hui-card-edit-mode")] : [];
+              const w = (want ? all.find(x => x.querySelector(want)) : null) || all[0];
               if (!w) return { error: "no wrapper" };
               const sr = w.shadowRoot;
               const cs = getComputedStyle(w);
-              const overlay = sr ? sr.querySelector(".overlay") : null;
+              const overlay = sr ? sr.querySelector(".card-overlay") : null;
+              const control = sr ? sr.querySelector(".card-overlay .control") : null;
+              const inner = w.firstElementChild;
+              const slot = w.parentElement;
               return {
                 rect: w.getBoundingClientRect().toJSON(),
                 display: cs.display,
                 props: { path: JSON.stringify(w.path), noMove: w.noMove,
                          hiddenOverlay: w.hiddenOverlay,
                          lovelace: !!w.lovelace, hass: !!w.hass },
+                card: inner ? { tag: inner.tagName,
+                                rect: inner.getBoundingClientRect().toJSON() } : null,
+                slot: slot ? { cls: slot.className,
+                               rect: slot.getBoundingClientRect().toJSON(),
+                               display: getComputedStyle(slot).display,
+                               gap: getComputedStyle(slot).gap } : null,
+                control: control ? control.getBoundingClientRect().toJSON() : null,
                 overlay: overlay ? {
                   rect: overlay.getBoundingClientRect().toJSON(),
                   opacity: getComputedStyle(overlay).opacity,
@@ -209,10 +248,17 @@ def main():
                   : [],
                 html: sr ? sr.innerHTML.slice(0, 700) : null
               };
-            }"""
+            }""".replace("WANTSEL", json.dumps(WANT))
         )
-        print("wrapper anatomy:", json.dumps(anatomy, indent=2)[:2000])
+        print("wrapper anatomy:", json.dumps(anatomy, indent=2)[:2600])
 
+        # HA's overlay only appears under the pointer, so hover the target
+        # before the screenshot -- otherwise the shot shows a plain dashboard
+        # and proves nothing about where the pencil lands.
+        if isinstance(anatomy, dict) and anatomy.get("rect"):
+            r = anatomy["rect"]
+            page.mouse.move(r["x"] + r["width"] / 2, r["y"] + r["height"] / 2)
+            page.wait_for_timeout(700)
         page.screenshot(path=str(SHOTS / "edit-mode.png"))
 
         # Open the first pin and see what dialog, if any, appears.

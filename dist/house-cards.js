@@ -1919,8 +1919,16 @@
      child while editing -- the same overlay, pencil and overflow menu a
      sections view puts on every card. There is deliberately no styling for it
      here: anything written in this file would be a second, different-looking
-     way to edit a card, which is the thing to avoid. See _wrap. */
-  .lcol { position: relative; }
+     way to edit a card, which is the thing to avoid. See _wrap.
+
+     The one line that IS needed is this one, and it is not styling -- it is
+     giving HA's overlay the containing block it expects. The overlay inside
+     hui-card-edit-mode is absolutely positioned, so it sizes itself to the
+     nearest POSITIONED ancestor. Without this the wrapper is static, the
+     search goes past it, and in a column holding two cards the overlay covers
+     both of them plus the gap: measured 400px against a 192px card, which put
+     the pencil in the space between the two air cards rather than on either. */
+  .lcol > hui-card-edit-mode { position: relative; display: block; }
 
   @media (max-width: 1000px) {
     .lrow { grid-template-columns: 1fr !important; }
