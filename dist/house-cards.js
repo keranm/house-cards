@@ -6385,9 +6385,7 @@
       const readRow = HC.el("div", "soil-read");
       this._metric = HC.el("span", "metric", "--");
       this._unit = HC.el("span", "unit", "%");
-      this._alarm = HC.pill("", "idle");
-      this._alarm.style.display = "none";
-      HC.add(readRow, this._metric, this._unit, this._alarm);
+      HC.add(readRow, this._metric, this._unit);
 
       const scale = HC.el("div", "soil-scale");
       const bands = HC.el("div", "soil-bands");
@@ -6465,16 +6463,13 @@
       HC.setClass(this._pin, "off", moisture == null);
       HC.setText(this._pinLabel, moisture == null ? "--" : Math.round(moisture) + "%");
 
-      /* The probe's own water alarm. It is shown beside our verdict rather
-         than instead of it: the device knows nothing about the forecast, so it
-         can be shouting "dry" on a morning when the right answer is to wait. */
-      const warn = HC.read(this.hass, s.water_warning);
-      const alarming = warn.ok && warn.state !== "normal" && warn.state !== "off";
-      this._alarm.style.display = alarming ? "" : "none";
-      if (alarming) {
-        this._alarm.setTone("warn");
-        HC.setText(this._alarm, "Probe says dry");
-      }
+      /* `water_warning` is deliberately not shown. It compares the probe's
+         reading to `number.a89g12c_arteco_soil_warning` -- the same helper
+         `soil_dry` is sourced from -- so it can only ever repeat the verdict
+         below, minus the rain. It also flaps: it fires `alarm` and clears to
+         `none` within 100 ms, dozens of times a day, so a badge driven by it
+         blinks. The fertility warning IS shown, because nothing here grades
+         EC and the device is the only opinion available. */
 
       const v = HC.soilVerdict(m.ok ? moisture : null, th,
                                HC.read(this.hass, this._g.rain_24h).value,
@@ -6489,7 +6484,10 @@
       /* Fertility is reported, not graded -- see the note at the top. */
       const f = HC.read(this.hass, s.fertility);
       const fw = HC.read(this.hass, s.fertility_warning);
-      const fLow = fw.ok && fw.state !== "normal" && fw.state !== "off";
+      /* Whitelist the alarm, do not blacklist the all-clears. This device's
+         clear state is the string "none", which a `!== "normal"` test reads as
+         an alarm and shows "low" forever. */
+      const fLow = fw.ok && fw.state === "alarm";
       HC.setText(this._vFeed, f.value == null ? "--"
         : Math.round(f.value) + " µS" + (fLow ? " · low" : ""));
       HC.setClass(this._vFeed, "alarm", fLow);
