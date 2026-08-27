@@ -4523,6 +4523,15 @@
    * where there are some to show -- a row of confident "0.0 L" is worse than
    * no litres at all.
    *
+   * THERE IS NO FLOW SENSOR. The valve is sold as having a flow meter and it
+   * does, but the Z2M converter surfaces it only as accumulated volume: there
+   * is no rate entity on any of the four devices. So the rate here is DERIVED,
+   * litres over elapsed, and it is an average across the run rather than an
+   * instantaneous reading. It is held back for the first couple of minutes
+   * because the volume arrives once every five and rounded to whole litres --
+   * at twenty seconds, one litre is 3 L/min and two litres is 6, and neither
+   * figure means anything.
+   *
    * A DATE HELPER'S STATE IS NAIVE LOCAL TIME. `input_datetime` renders as
    * "2026-08-10 06:30:00" with no zone, so parsing the state lands hours out.
    * The `timestamp` attribute is the one to read.
@@ -4571,6 +4580,11 @@
   .rain .mm { font-family: var(--hc-mono); font-weight: 600; }
   `;
 
+  /* How long a run has to have been going before its average rate is worth
+     printing. Volume lands once every five minutes rounded to whole litres, so
+     below this the figure is quantisation, not flow. */
+  const FLOW_MIN_MINS = 2;
+
   class Taps extends HC.Card {
     build() {
       const cfg = this._config;
@@ -4615,7 +4629,7 @@
           const v = HC.el("div", "v", "--");
           HC.add(s, k, v);
           HC.add(stats, s);
-          return { k, v };
+          return { s, k, v };
         };
         const first = mk("Last run");
         const vWeek = mk("This week").v;
@@ -4656,6 +4670,45 @@
       return d.getFullYear() < 2001 ? null : d;
     }
 
+    /* What the valve is working to when it is opened by hand, or null.
+
+       Two of these taps run in CAPACITY mode -- open until N litres have
+       passed, with a fail-safe that shuts them anyway after N minutes. That
+       matters for more than display: a flow meter that under-reads can never
+       reach its litre target, so the run goes to the fail-safe every time and
+       the card is the only place that would show it.
+
+       `manual_default_settings` is a Z2M passthrough and its state is a PYTHON
+       repr -- single quotes, True/False -- not JSON, so it needs coaxing first.
+       HA also caps a state string at 255 characters and this one runs to about
+       180, so a firmware that adds a field could truncate it mid-string. Both
+       failures land in the same catch, and the card then shows no target
+       rather than a wrong one. */
+    _target(t) {
+      const r = HC.read(this.hass, t.settings);
+      if (!r.ok || !r.state) return null;
+      let cfg;
+      try {
+        cfg = JSON.parse(String(r.state)
+          .replace(/'/g, '"').replace(/\bTrue\b/g, "true")
+          .replace(/\bFalse\b/g, "false").replace(/\bNone\b/g, "null"));
+      } catch (e) { return null; }
+      if (!cfg || typeof cfg !== "object") return null;
+
+      const fail = HC.num(cfg.fail_safe) || 0;
+      /* The unit is a device setting and it is not always litres, so a
+         gallon target is left alone rather than relabelled as L. */
+      if (cfg.irrigation_mode === "capacity" && cfg.irrigation_amount_unit === "liter") {
+        const amt = HC.num(cfg.irrigation_amount);
+        if (amt > 0) return { kind: "L", amount: amt, fail };
+      }
+      if (cfg.irrigation_mode === "duration") {
+        const mins = HC.num(cfg.irrigation_total_duration);
+        if (mins > 0) return { kind: "min", amount: mins, fail };
+      }
+      return null;
+    }
+
     /* The run happening right now, or null.
 
        Elapsed comes from the SWITCH, not from the valve's own
@@ -4676,7 +4729,12 @@
       if (!started || isNaN(started.getTime())) return null;
       const mins = (Date.now() - started.getTime()) / 60000;
       if (!(mins >= 0)) return null;
-      return { started, mins, litres: HC.read(this.hass, t.live_volume).value };
+      const litres = HC.read(this.hass, t.live_volume).value;
+      /* Litres per minute, averaged over the run -- see the note at the top
+         about there being no rate sensor to read instead. Below FLOW_MIN_MINS
+         the figure is quantisation rather than flow, so it is withheld. */
+      const rate = (mins >= FLOW_MIN_MINS && litres > 0) ? litres / mins : null;
+      return { started, mins, litres, rate };
     }
 
     update() {
@@ -4712,6 +4770,7 @@
 
         HC.setText(r.sub, !sw.ok ? "Valve not reporting"
           : live ? `Running ${HC.duration(live.mins)} · since ${HC.clock(live.started)}`
+                   + (live.rate == null ? "" : ` · ${HC.dec(live.rate, 1)} L/min`)
           : on ? "Running now"
           : last ? `Last watered ${HC.ago(last)}`
           : ranSometime ? "Has run — no date recorded"
@@ -4726,9 +4785,11 @@
 
         /* While the tap is open the leading stat is the run in progress. The
            run before it is not what anyone is looking at the card to find. */
+        const target = this._target(t);
         HC.setText(r.kLast, live ? "This run" : "Last run");
-        HC.setText(r.vLast, live ? withVol(live.mins, live.litres)
+        HC.setText(r.vLast, live ? this._runText(live, target)
           : dur != null && dur > 0 ? withVol(dur, vol) : "Never");
+
 
         /* And the totals carry the run in flight. Not doing so puts "THIS RUN
            37m" next to "THIS MONTH 12m" in the same row, which is not a
@@ -4764,6 +4825,21 @@
       this._running = running > 0;
 
       this._rain();
+    }
+
+    /* "45m · 2.0 / 30 L" -- elapsed, what has passed the meter, and what the
+       valve is trying to reach. The target is the half that turns a number
+       into a verdict: 2 of 30 litres after 45 minutes says the run failed,
+       where a bare "2.0 L" says nothing at all. */
+    _runText(live, target) {
+      const t = HC.duration(live.mins);
+      const l = live.litres;
+      if (target && target.kind === "L")
+        return `${t} · ${HC.dec(l || 0, 1)} / ${HC.dec(target.amount, 0)} L`;
+      if (target && target.kind === "min")
+        return l ? `${t} / ${HC.duration(target.amount)} · ${HC.dec(l, 1)} L`
+                 : `${t} / ${HC.duration(target.amount)}`;
+      return l ? `${t} · ${HC.dec(l, 1)} L` : t;
     }
 
     /* Should you water? The thresholds match the ones the garden automations
