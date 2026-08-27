@@ -16,6 +16,15 @@
    * A DATE HELPER'S STATE IS NAIVE LOCAL TIME. `input_datetime` renders as
    * "2026-08-10 06:30:00" with no zone, so parsing the state lands hours out.
    * The `timestamp` attribute is the one to read.
+   *
+   * A RUN IN PROGRESS IS NOT THE RUN BEFORE IT. Every figure on this card is
+   * stamped by the run-finished automation when the valve CLOSES, so while a
+   * tap is open the whole row describes some earlier watering. "Running now"
+   * beside "LAST RUN 10m" is the card at its least useful: the one question a
+   * person standing over an open valve is asking -- how long has this been
+   * going -- is the one thing it did not answer. While a tap is on, the first
+   * stat becomes the run in flight and the totals carry it, so the row
+   * describes what the garden is getting rather than what it got.
    */
 
   const TAPS_CSS = `
@@ -74,7 +83,9 @@
 
         const left = HC.el("div");
         const name = HC.el("div", "tname");
-        HC.add(name, HC.el("span", null, t.name));
+        const dot = HC.el("span", "dot pulse");
+        dot.hidden = true;
+        HC.add(name, dot, HC.el("span", null, t.name));
         const sub = HC.el("div", "tsub");
         HC.add(left, name, sub);
 
@@ -86,22 +97,25 @@
         });
 
         const stats = HC.el("div", "tstats");
+        /* The first stat's LABEL changes with the tap's state, so it is kept
+           alongside its value rather than written once and forgotten. */
         const mk = (label) => {
           const s = HC.el("div", "tstat");
           const k = HC.el("div", "k", label);
           const v = HC.el("div", "v", "--");
           HC.add(s, k, v);
           HC.add(stats, s);
-          return v;
+          return { k, v };
         };
-        const vLast = mk("Last run");
-        const vWeek = mk("This week");
-        const vMonth = mk("This month");
-        const vBatt = mk("Battery");
+        const first = mk("Last run");
+        const vWeek = mk("This week").v;
+        const vMonth = mk("This month").v;
+        const vBatt = mk("Battery").v;
 
         HC.add(row, left, btn, stats);
         HC.add(list, row);
-        return { t, row, sub, btn, vLast, vWeek, vMonth, vBatt };
+        return { t, row, dot, sub, btn,
+                 kLast: first.k, vLast: first.v, vWeek, vMonth, vBatt };
       });
 
       const rain = HC.el("div", "rain");
@@ -132,6 +146,29 @@
       return d.getFullYear() < 2001 ? null : d;
     }
 
+    /* The run happening right now, or null.
+
+       Elapsed comes from the SWITCH, not from the valve's own
+       `real_time_irrigation_duration`. That sensor reports whole minutes and
+       only every five, so a tap opened forty seconds ago reads 0 and still
+       reads 0 four minutes later; and it zeroes at midnight rather than at the
+       start of a run, so across two runs in one day what it counts is anyone's
+       guess. `last_changed` is to the second and is the same clock the
+       run-finished automation uses to write `last_duration` -- so the minutes
+       shown during the run are the minutes that land in the log.
+
+       Litres are the valve's own live counter, which is the same sensor that
+       automation reads to stamp `last_volume`. It is no more trustworthy here
+       than it is there -- see the note at the top -- but it is not a new
+       source: it is the logged figure, quoted before the log is written. */
+    _live(t, sw) {
+      const started = sw.changed ? new Date(sw.changed) : null;
+      if (!started || isNaN(started.getTime())) return null;
+      const mins = (Date.now() - started.getTime()) / 60000;
+      if (!(mins >= 0)) return null;
+      return { started, mins, litres: HC.read(this.hass, t.live_volume).value };
+    }
+
     update() {
       let running = 0;
 
@@ -159,7 +196,12 @@
         const monthMins = HC.read(this.hass, t.month_minutes).value;
         const ranSometime = (dur != null && dur > 0) || (monthMins != null && monthMins > 0);
 
+        const live = on ? this._live(t, sw) : null;
+        r.dot.hidden = !live;
+        r.dot.style.background = live ? "var(--hc-blue)" : "";
+
         HC.setText(r.sub, !sw.ok ? "Valve not reporting"
+          : live ? `Running ${HC.duration(live.mins)} · since ${HC.clock(live.started)}`
           : on ? "Running now"
           : last ? `Last watered ${HC.ago(last)}`
           : ranSometime ? "Has run — no date recorded"
@@ -172,11 +214,30 @@
           return litres ? `${m} · ${HC.dec(litres, 1)} L` : m;
         };
 
-        HC.setText(r.vLast, dur != null && dur > 0 ? withVol(dur, vol) : "Never");
-        HC.setText(r.vWeek, withVol(HC.read(this.hass, t.week_minutes).value,
-                                    HC.read(this.hass, t.week_volume).value));
-        HC.setText(r.vMonth, withVol(monthMins,
-                                     HC.read(this.hass, t.month_volume).value));
+        /* While the tap is open the leading stat is the run in progress. The
+           run before it is not what anyone is looking at the card to find. */
+        HC.setText(r.kLast, live ? "This run" : "Last run");
+        HC.setText(r.vLast, live ? withVol(live.mins, live.litres)
+          : dur != null && dur > 0 ? withVol(dur, vol) : "Never");
+
+        /* And the totals carry the run in flight. Not doing so puts "THIS RUN
+           37m" next to "THIS MONTH 12m" in the same row, which is not a
+           subtlety about when helpers get stamped -- it just reads as broken.
+           This is the same addition the run-finished automation performs the
+           moment the valve shuts, done early, so the figure never contradicts
+           the stat beside it and does not jump when the run ends. */
+        const rollIn = (total, sofar) => {
+          if (!live) return total;
+          if (total == null) return sofar;
+          return total + (sofar || 0);
+        };
+
+        HC.setText(r.vWeek, withVol(
+          rollIn(HC.read(this.hass, t.week_minutes).value, live && live.mins),
+          rollIn(HC.read(this.hass, t.week_volume).value, live && live.litres)));
+        HC.setText(r.vMonth, withVol(
+          rollIn(monthMins, live && live.mins),
+          rollIn(HC.read(this.hass, t.month_volume).value, live && live.litres)));
 
         const batt = HC.read(this.hass, t.battery).value;
         HC.setText(r.vBatt, batt == null ? "--" : Math.round(batt) + "%");
@@ -189,6 +250,8 @@
       HC.setText(this._note, running
         ? `${running} running`
         : `${this._rows.length} taps · all off`);
+
+      this._running = running > 0;
 
       this._rain();
     }
@@ -214,6 +277,27 @@
 
       HC.setText(this._verdict, verdict);
       HC.setText(this._mm, `${HC.dec(a, 1)} MM / 24H · ${HC.dec(b, 1)} MM / 48H`);
+    }
+
+    /* The elapsed figure has to move on its own. Lovelace pushes a new `hass`
+       when an entity changes, and a tap that is quietly running changes
+       nothing for minutes at a time -- the valve reports every five. Without a
+       tick of our own "Running 12m" would sit there for the next five minutes,
+       which is the stale-number problem again in a smaller box. */
+    connectedCallback() {
+      if (!this._timer) this._timer = setInterval(() => this._tick(), 1000);
+    }
+
+    /* Lovelace keeps card elements alive after you navigate away. */
+    disconnectedCallback() {
+      if (this._timer) clearInterval(this._timer);
+      this._timer = null;
+    }
+
+    /* Nothing on this card moves between hass updates while every tap is shut,
+       so the idle case costs one boolean rather than a redraw. */
+    _tick() {
+      if (this._running && this.hass && this.isConnected) this.update();
     }
 
     getCardSize() { return 8; }
